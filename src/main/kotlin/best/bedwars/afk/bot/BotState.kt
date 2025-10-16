@@ -8,7 +8,11 @@ enum class BotState {
     AT_SHOP,            // At shop buying items
     RETURNING_TO_GEN,   // Walking back to generator
     DEFENSE_MODE,       // Enemy detected, defending
-    RESPAWNING          // Dead, waiting to respawn
+    RESPAWNING,         // Dead, waiting to respawn
+    DEFENDING_BED,      // Placing blocks around bed
+    BRIDGING_TO_DIAMOND,// Bridging to diamond generator
+    COLLECTING_DIAMONDS,// Collecting diamonds
+    RETURNING_FROM_DIAMOND  // Returning from diamond island
 }
 
 

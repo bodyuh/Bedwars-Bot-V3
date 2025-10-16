@@ -4,6 +4,7 @@ import best.bedwars.afk.BedwarsAFK
 import best.bedwars.afk.utils.ChatUtils
 import best.bedwars.afk.utils.RandomUtils
 import best.bedwars.afk.utils.TimeUtils
+import net.minecraft.util.EnumChatFormatting
 import net.minecraftforge.client.event.ClientChatReceivedEvent
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent
 
@@ -123,21 +124,54 @@ class ChatEventHandler {
             // Would implement inventory clearing here
         }
         
+        // Detect when bot tries to break protected blocks
+        if (unformatted.contains("You can't break blocks here", ignoreCase = true)) {
+            ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Can't break blocks in this area")
+            // Bot will naturally timeout and try alternative strategies
+        }
+        
         // Purchase tracking (filter out player messages with ":")
         if (!unformatted.contains(":")) {
+            // Match both "You purchased" and "You purchase" for different server versions
+            val isPurchaseMessage = unformatted.contains("You purchased", ignoreCase = true) || 
+                                   unformatted.contains("You purchase", ignoreCase = true)
+            
             // Wool purchase detected
-            if (unformatted.contains("You purchased", ignoreCase = true) && 
-                unformatted.contains("Wool", ignoreCase = true)) {
+            if (isPurchaseMessage && unformatted.contains("Wool", ignoreCase = true)) {
                 ChatUtils.info("Wool purchase detected!")
-                best.bedwars.afk.bot.ResourceTracker.update()
+                // Delay update to allow items to appear in inventory
+                TimeUtils.setTimeout({
+                    best.bedwars.afk.bot.ResourceTracker.update()
+                }, 200)
+            }
+            
+            // Wood planks purchase detected
+            if (isPurchaseMessage && unformatted.contains("Wood", ignoreCase = true)) {
+                ChatUtils.info("Wood planks purchase detected!")
+                // Delay update to allow items to appear in inventory
+                TimeUtils.setTimeout({
+                    best.bedwars.afk.bot.ResourceTracker.update()
+                }, 200)
+            }
+            
+            // End Stone purchase detected
+            if (isPurchaseMessage && unformatted.contains("End Stone", ignoreCase = true)) {
+                ChatUtils.info("End Stone purchase detected!")
+                // Delay update to allow items to appear in inventory
+                TimeUtils.setTimeout({
+                    best.bedwars.afk.bot.ResourceTracker.update()
+                }, 200)
             }
             
             // Iron Armor purchase detected
-            if (unformatted.contains("You purchased", ignoreCase = true) && 
+            if (isPurchaseMessage && 
                 (unformatted.contains("Iron Armor", ignoreCase = true) || 
                  unformatted.contains("Permanent Iron Armor", ignoreCase = true))) {
                 ChatUtils.info("Iron Armor purchase detected!")
-                best.bedwars.afk.bot.ResourceTracker.update()
+                // Delay update to allow armor to appear in inventory/equipment
+                TimeUtils.setTimeout({
+                    best.bedwars.afk.bot.ResourceTracker.update()
+                }, 200)
             }
         }
 

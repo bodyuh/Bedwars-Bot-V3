@@ -3,6 +3,7 @@ package best.bedwars.afk.bot
 import best.bedwars.afk.BedwarsAFK
 import best.bedwars.afk.bot.LocationManager
 import best.bedwars.afk.bot.pathfinding.AdvancedPathfinder
+import best.bedwars.afk.bot.pathfinding.BridgingPathfinder
 import best.bedwars.afk.bot.player.Inventory
 import best.bedwars.afk.bot.player.LobbyMovement
 import best.bedwars.afk.bot.player.Mouse
@@ -12,6 +13,7 @@ import best.bedwars.afk.utils.*
 import net.minecraft.client.settings.KeyBinding
 import net.minecraft.entity.Entity
 import net.minecraft.entity.player.EntityPlayer
+import net.minecraft.util.BlockPos
 import net.minecraft.util.EnumChatFormatting
 import net.minecraftforge.event.entity.EntityJoinWorldEvent
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent
@@ -31,6 +33,11 @@ class BedwarsBot {
     private var genX: Double = 0.0
     private var genY: Double = 0.0
     private var genZ: Double = 0.0
+    
+    // Progress tracking
+    private var hasDefendedBed = false
+    private var hasCollectedDiamonds = false
+    private var diamondBridgeComplete = false
     
     // Teammate tracking
     private var teammate1: String = ""
@@ -84,6 +91,11 @@ class BedwarsBot {
         
         // Clear saved locations from previous game
         LocationManager.clearAll()
+        
+        // Reset progress flags
+        hasDefendedBed = false
+        hasCollectedDiamonds = false
+        diamondBridgeComplete = false
         
         ChatUtils.info("Walking Back Into Generator")
         state = BotState.STARTING
@@ -226,16 +238,33 @@ class BedwarsBot {
                 // Update resource tracker
                 ResourceTracker.update()
                 
-                // Check if we have 64 wool - time to defend bed!
                 val woolCount = ResourceTracker.getWool()
-                if (woolCount >= 64) {
-                    ChatUtils.info("${EnumChatFormatting.GOLD}✓ Wool goal reached! Going to defend bed...")
-                    startBedDefense()
-                    return@setInterval
+                
+                // Priority 1: Defend bed with first 16 wool (check even if bed pos not known yet)
+                if (woolCount >= 16 && !hasDefendedBed) {
+                    // Auto-detect bed location if not known
+                    if (LocationManager.bedPos == null) {
+                        LocationManager.autoDetectBed(30)
+                    }
+                    
+                    if (LocationManager.bedPos != null) {
+                        ChatUtils.info("${EnumChatFormatting.GOLD}✓ First 16 wool! Defending bed...")
+                        startBedDefense()
+                        hasDefendedBed = true // Only defend once
+                        return@setInterval
+                    } else {
+                        ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ 16 wool ready, but bed not detected yet")
+                    }
                 }
                 
-                // Check if we actually need to shop (has resources AND needs items)
-                if (ResourceTracker.shouldGoShopping()) {
+                // Priority 2: DISABLED - Bridging to diamond generator
+                // (Focusing on bed defense only)
+                
+                // Priority 3: Regular shopping (only if not ready for major actions)
+                // Don't shop if we're at/near the wool thresholds for bed defense
+                val nearBedDefenseThreshold = woolCount >= 12 && !hasDefendedBed // Close to 16
+                
+                if (!nearBedDefenseThreshold && ResourceTracker.shouldGoShopping()) {
                     ChatUtils.info("Shopping triggered")
                     startPurchase()
                 }
@@ -376,12 +405,10 @@ class BedwarsBot {
     }
 
     private fun startBedDefense() {
-        // Auto-detect bed location
-        LocationManager.autoDetectBed(30)
-        
-        val bedPos = LocationManager.getBed()
+        val bedPos = LocationManager.bedPos
         if (bedPos == null) {
             ChatUtils.error("Bed not found! Can't defend")
+            returnToGenerator()
             return
         }
         
@@ -389,17 +416,31 @@ class BedwarsBot {
         stopTimers()
         Movement.clearAll()
         
-        state = BotState.PURCHASING // Reuse state to prevent other actions
+        state = BotState.DEFENDING_BED
         
-        // Navigate to bed
+        // Set timeout for navigation (30 seconds)
+        val navigationTimeout = TimeUtils.setTimeout({
+            ChatUtils.info("${EnumChatFormatting.RED}⚠ Navigation to bed timed out, returning to generator...")
+            BedDefender.stopDefense()
+            returnToGenerator()
+        }, 30000)
+        
+        // Navigate to bed first
         LocationManager.goToBed {
-            ChatUtils.info("${EnumChatFormatting.GREEN}Reached bed! Starting defense...")
+            navigationTimeout?.cancel()
+            ChatUtils.info("${EnumChatFormatting.GREEN}Reached bed! Building initial defense...")
             
-            // Start placing blocks around bed
+            // Build initial defense first
             BedDefender.startDefense(bedPos) {
-                // Defense complete, return to generator
-                ChatUtils.info("${EnumChatFormatting.GREEN}Bed defense complete! Returning to generator...")
-                returnToGenerator()
+                ChatUtils.info("${EnumChatFormatting.GREEN}Initial defense complete! Starting periodic monitoring...")
+                
+                // Now start periodic defense system to maintain it
+                BedDefender.startPeriodicDefense(bedPos) {
+                    // Need more resources - go shopping
+                    ChatUtils.info("${EnumChatFormatting.YELLOW}Need defense resources, going shopping...")
+                    BedDefender.stopPeriodicDefense()
+                    startPurchase()
+                }
             }
         }
     }
@@ -412,6 +453,7 @@ class BedwarsBot {
         
         if (!ResourceTracker.shouldGoShopping()) {
             ChatUtils.info("No shopping needed right now")
+            returnToGenerator()
             return
         }
         
@@ -427,6 +469,14 @@ class BedwarsBot {
         stopTimers()
         Movement.clearAll()
         
+        // Set timeout for entire shopping process (60 seconds)
+        val shoppingTimeout = TimeUtils.setTimeout({
+            ChatUtils.info("${EnumChatFormatting.RED}⚠ Shopping timed out, returning to generator...")
+            isPurchasing = false
+            closeMenu()
+            returnToGenerator()
+        }, 60000)
+        
         TimeUtils.setTimeout({
             // Find item shop
             itemShop = EntityUtils.findItemShop()
@@ -436,21 +486,32 @@ class BedwarsBot {
                 LocationManager.saveShopkeeper(itemShop!!)
                 
                 // Start moving toward shop
-                navigateToShop()
+                navigateToShop(shoppingTimeout)
             } else {
                 // Shop not found, return to gen
+                shoppingTimeout?.cancel()
+                isPurchasing = false
                 returnToGenerator()
             }
         }, 500)
     }
 
-    private fun navigateToShop() {
+    private fun navigateToShop(shoppingTimeout: Timer?) {
         state = BotState.PURCHASING
+        
+        // Set timeout for navigation to shop (30 seconds)
+        val navigationTimeout = TimeUtils.setTimeout({
+            ChatUtils.info("${EnumChatFormatting.RED}⚠ Navigation to shop timed out...")
+            shoppingTimeout?.cancel()
+            isPurchasing = false
+            returnToGenerator()
+        }, 30000)
         
         // Use LocationManager for reliable navigation and interaction
         LocationManager.goToShopkeeper {
+            navigationTimeout?.cancel()
             // Shop menu opened successfully
-            startShopPurchase()
+            startShopPurchase(shoppingTimeout)
         }
     }
 
@@ -468,14 +529,25 @@ class BedwarsBot {
         }, 50)
     }
 
-    private fun startShopPurchase() {
+    private fun startShopPurchase(shoppingTimeout: Timer?) {
         state = BotState.AT_SHOP
         
         // Update resources before shopping
         ResourceTracker.update()
         
+        // Set timeout for shop purchase (20 seconds)
+        val purchaseTimeout = TimeUtils.setTimeout({
+            ChatUtils.info("${EnumChatFormatting.RED}⚠ Purchase process timed out...")
+            shoppingTimeout?.cancel()
+            isPurchasing = false
+            closeMenu()
+            returnToGenerator()
+        }, 20000)
+        
         // Execute shopping using ShopHandler
         ShopHandler.executeShopping {
+            purchaseTimeout?.cancel()
+            shoppingTimeout?.cancel()
             // Shopping complete, return to generator
             Mouse.stopTracking()
             returnToGenerator()
@@ -488,10 +560,22 @@ class BedwarsBot {
         
         Movement.clearAll()
         Mouse.stopTracking()
+        BedDefender.stopPeriodicDefense()
+        
+        // Set timeout for returning to generator (45 seconds)
+        val returnTimeout = TimeUtils.setTimeout({
+            ChatUtils.info("${EnumChatFormatting.RED}⚠ Return to generator timed out, restarting idle...")
+            isPurchasing = false
+            returningToGen = false
+            Movement.clearAll()
+            Mouse.stopTracking()
+            startIdleAtGen()
+        }, 45000)
         
         // Use LocationManager for reliable navigation to generator
         LocationManager.goToGenerator(
             onComplete = {
+                returnTimeout?.cancel()
                 // Successfully returned to generator
                 isPurchasing = false
                 returningToGen = false
@@ -520,20 +604,31 @@ class BedwarsBot {
         
         ChatUtils.info("Game Ended. Requeueing.")
         
-        stopTimers()
-        Movement.clearAll()
-        Mouse.stopTracking()
+        // Stop everything completely
+        stopAll()
+        
+        // Stop bed defender
+        BedDefender.stopPeriodicDefense()
+        BedDefender.stopDefense()
+        
+        // Stop all pathfinding
+        BridgingPathfinder.stop()
         LocationManager.clearAll()
         
         state = BotState.LOBBY
         isDefending = false
         isPurchasing = false
         returningToGen = false
+        hasDefendedBed = false
+        hasCollectedDiamonds = false
         
         // Reset teammate tracking
         teammate1 = ""
         teammate2 = ""
         teammate3 = ""
+        
+        // Reset resource tracker
+        ResourceTracker.reset()
         
         TimeUtils.setTimeout({
             joinGame()
@@ -553,10 +648,97 @@ class BedwarsBot {
         Movement.clearAll()
         Mouse.stopTracking()
         LobbyMovement.stop()
+        BridgingPathfinder.stop()
         state = BotState.LOBBY
         isDefending = false
         isPurchasing = false
         returningToGen = false
+        hasDefendedBed = false
+        hasCollectedDiamonds = false
+        diamondBridgeComplete = false
+    }
+    
+    /**
+     * Test bridge building (small bridge then return)
+     */
+    private fun startBridgeTest() {
+        state = BotState.BRIDGING_TO_DIAMOND
+        ChatUtils.info("${EnumChatFormatting.AQUA}═══════════════════════════════")
+        ChatUtils.info("${EnumChatFormatting.GOLD}⚙ BRIDGE TEST MODE ⚙")
+        ChatUtils.info("${EnumChatFormatting.AQUA}═══════════════════════════════")
+        
+        hasCollectedDiamonds = true // Mark as complete to prevent re-triggering
+        
+        // Find and start bridging toward diamond generator
+        BridgingPathfinder.findAndBridgeToDiamondGenerator {
+            // After bridging attempt, return to base
+            ChatUtils.info("${EnumChatFormatting.YELLOW}Bridge test complete! Returning to base...")
+            
+            // Stop bridging and return to generator
+            TimeUtils.setTimeout({
+                BridgingPathfinder.stop()
+                returnToGenerator()
+            }, 2000)
+        }
+    }
+    
+    /**
+     * Start diamond collection sequence (DISABLED FOR NOW)
+     */
+    private fun startDiamondCollection() {
+        state = BotState.BRIDGING_TO_DIAMOND
+        ChatUtils.info("${EnumChatFormatting.AQUA}═══════════════════════════════")
+        ChatUtils.info("${EnumChatFormatting.GOLD}⛏ DIAMOND COLLECTION MODE ⛏")
+        ChatUtils.info("${EnumChatFormatting.AQUA}═══════════════════════════════")
+        
+        // Find and bridge to diamond generator (by entity name tag)
+        BridgingPathfinder.findAndBridgeToDiamondGenerator {
+            // Bridging complete or failed
+            val diamondGen = BridgingPathfinder.getSavedGeneratorPos()
+            if (diamondGen != null) {
+                ChatUtils.info("${EnumChatFormatting.GREEN}✓ Diamond generator located!")
+                startDiamondPickup(diamondGen)
+            } else {
+                ChatUtils.error("Failed to locate diamond generator!")
+                state = BotState.IDLE_AT_GEN
+                hasCollectedDiamonds = true // Don't retry
+            }
+        }
+    }
+    
+    /**
+     * Pick up diamonds from the generator
+     */
+    private fun startDiamondPickup(diamondGenPos: BlockPos) {
+        state = BotState.COLLECTING_DIAMONDS
+        ChatUtils.info("${EnumChatFormatting.YELLOW}💎 Collecting diamonds...")
+        
+        // Stand at the diamond generator for a bit to collect
+        TimeUtils.setTimeout({
+            val initialDiamonds = Inventory.getItemCount("diamond")
+            ChatUtils.info("${EnumChatFormatting.GRAY}Waiting for diamonds to spawn...")
+            
+            // Wait 10 seconds at the generator
+            TimeUtils.setTimeout({
+                val finalDiamonds = Inventory.getItemCount("diamond")
+                val collected = finalDiamonds - initialDiamonds
+                
+                if (collected > 0) {
+                    ChatUtils.info("${EnumChatFormatting.GREEN}✓ Collected $collected diamonds!")
+                } else {
+                    ChatUtils.info("${EnumChatFormatting.YELLOW}No diamonds collected (may need to wait longer)")
+                }
+                
+                // Return to base
+                hasCollectedDiamonds = true
+                state = BotState.RETURNING_FROM_DIAMOND
+                
+                // The BridgingPathfinder already returns us to start position
+                // Just wait for it to complete
+                ChatUtils.info("${EnumChatFormatting.GREEN}✓ Diamond collection complete!")
+                state = BotState.IDLE_AT_GEN
+            }, 10000)
+        }, 1000)
     }
 
     @SubscribeEvent

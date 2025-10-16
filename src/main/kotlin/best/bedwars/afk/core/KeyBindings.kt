@@ -7,6 +7,7 @@ import org.lwjgl.input.Keyboard
 object KeyBindings {
     
     lateinit var toggleBotKeyBinding: KeyBinding
+    lateinit var testBridgingKeyBinding: KeyBinding
     
     fun register() {
         toggleBotKeyBinding = KeyBinding(
@@ -15,7 +16,14 @@ object KeyBindings {
             "Keystrokes Mod"
         )
         
+        testBridgingKeyBinding = KeyBinding(
+            "Test Bridging to Diamond",
+            Keyboard.KEY_B,
+            "Bedwars Bot"
+        )
+        
         ClientRegistry.registerKeyBinding(toggleBotKeyBinding)
+        ClientRegistry.registerKeyBinding(testBridgingKeyBinding)
     }
 }
 

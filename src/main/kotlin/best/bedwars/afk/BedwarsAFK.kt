@@ -47,6 +47,8 @@ class BedwarsAFK {
         MinecraftForge.EVENT_BUS.register(PathRenderer)
         MinecraftForge.EVENT_BUS.register(best.bedwars.afk.bot.ResourceTracker)
         MinecraftForge.EVENT_BUS.register(best.bedwars.afk.bot.BedDefender)
+        MinecraftForge.EVENT_BUS.register(best.bedwars.afk.events.KeybindHandler)
+        MinecraftForge.EVENT_BUS.register(best.bedwars.afk.bot.pathfinding.BridgingPathfinder)
         
         // Register keybindings
         KeyBindings.register()

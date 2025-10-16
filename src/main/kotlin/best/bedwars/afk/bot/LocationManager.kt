@@ -29,7 +29,8 @@ object LocationManager {
     private var generatorPos: BlockPos? = null
     private var shopkeeperPos: BlockPos? = null
     private var shopkeeperEntity: Entity? = null
-    private var bedPos: BlockPos? = null
+    var bedPos: BlockPos? = null  // Public for bed defense check
+        private set
     private var chestPos: BlockPos? = null
     private var enderChestPos: BlockPos? = null
     
@@ -254,13 +255,221 @@ object LocationManager {
                 ChatUtils.info("${EnumChatFormatting.YELLOW}→ Retrying generator navigation (attempt ${retryCount + 1}/5)...")
             }
             
-            AdvancedPathfinder.goTo(gen.x, gen.y, gen.z) {
-                ChatUtils.info("Reached generator area, moving until resources detected...")
+            // First, try to detect the exact generator position by looking for dropped items
+            val detectedGen = detectGeneratorByDroppedItems()
+            val targetGen = detectedGen ?: gen
+            
+            if (detectedGen != null) {
+                ChatUtils.info("${EnumChatFormatting.GREEN}✓ Generator detected at ${detectedGen.x}, ${detectedGen.y}, ${detectedGen.z}")
+                generatorPos = detectedGen // Update to exact position
+            }
+            
+            AdvancedPathfinder.goTo(targetGen.x, targetGen.y, targetGen.z) {
+                ChatUtils.info("Reached generator area, aligning to exact position...")
                 
-                // Keep moving toward generator until we pick up resources
-                moveUntilResourcePickup(gen, retryCount, onComplete)
+                // Align to exact generator coordinates
+                alignToGenerator(targetGen, retryCount, onComplete)
             }
         }
+    }
+    
+    /**
+     * Detect generator by looking for dropped iron/gold items nearby
+     */
+    private fun detectGeneratorByDroppedItems(): BlockPos? {
+        val world = BedwarsAFK.mc.theWorld ?: return null
+        val player = BedwarsAFK.mc.thePlayer ?: return null
+        
+        // Look for dropped items (EntityItem) within 10 blocks
+        val nearbyEntities = world.loadedEntityList
+        var closestItemPos: BlockPos? = null
+        var closestDistance = Double.MAX_VALUE
+        
+        for (entity in nearbyEntities) {
+            if (entity is net.minecraft.entity.item.EntityItem) {
+                val itemStack = entity.entityItem
+                val itemName = itemStack?.unlocalizedName?.lowercase() ?: continue
+                
+                // Check if it's iron or gold
+                if (itemName.contains("iron") || itemName.contains("gold")) {
+                    val distance = player.getDistanceToEntity(entity).toDouble()
+                    
+                    if (distance < 10.0 && distance < closestDistance) {
+                        closestDistance = distance
+                        closestItemPos = BlockPos(entity.posX, entity.posY, entity.posZ)
+                    }
+                }
+            }
+        }
+        
+        return closestItemPos
+    }
+    
+    /**
+     * Align player to exact generator coordinates
+     */
+    private fun alignToGenerator(genPos: BlockPos, retryCount: Int, onComplete: () -> Unit) {
+        val player = BedwarsAFK.mc.thePlayer
+        if (player == null) {
+            onComplete()
+            return
+        }
+        
+        // Calculate distance to generator
+        val currentDist = sqrt(
+            (player.posX - genPos.x - 0.5).pow(2.0) +
+            (player.posZ - genPos.z - 0.5).pow(2.0)
+        )
+        
+        ChatUtils.info("${EnumChatFormatting.GRAY}Distance to gen: ${String.format("%.2f", currentDist)} blocks")
+        
+        // If we're already very close (within 0.5 blocks), just stand still
+        if (currentDist < 0.5) {
+            ChatUtils.info("${EnumChatFormatting.GREEN}✓ Perfectly aligned!")
+            Movement.stopForward()
+            Mouse.stopTracking()
+            
+            // Update generator position to current location
+            generatorPos = player.position
+            
+            isNavigating = false
+            currentDestination = ""
+            onComplete()
+            return
+        }
+        
+        // If we're close but not perfect (0.5 - 1.5 blocks), fine-tune position
+        if (currentDist < 1.5) {
+            fineTuneGeneratorPosition(genPos, retryCount, onComplete)
+        } else {
+            // Still too far, move until we pick up resources
+            moveUntilResourcePickup(genPos, retryCount, onComplete)
+        }
+    }
+    
+    /**
+     * Fine-tune position to get exactly on the generator
+     */
+    private fun fineTuneGeneratorPosition(genPos: BlockPos, retryCount: Int, onComplete: () -> Unit) {
+        val player = BedwarsAFK.mc.thePlayer
+        if (player == null) {
+            onComplete()
+            return
+        }
+        
+        ChatUtils.info("${EnumChatFormatting.YELLOW}⚙ Fine-tuning position...")
+        
+        // Record initial resource count
+        val initialIron = best.bedwars.afk.bot.player.Inventory.getIronCount()
+        val initialGold = best.bedwars.afk.bot.player.Inventory.getGoldCount()
+        
+        // Calculate precise rotation toward generator center
+        val rotations = best.bedwars.afk.utils.EntityUtils.getRotationsToCoords(
+            player,
+            genPos.x + 0.5,
+            genPos.y.toDouble(),
+            genPos.z + 0.5
+        )
+        
+        if (rotations != null) {
+            player.rotationYaw = rotations[0]
+        }
+        
+        // Move slowly forward
+        TimeUtils.setTimeout({
+            Movement.startForward()
+            
+            var checkCount = 0
+            val maxChecks = 30 // 1.5 seconds
+            
+            var alignTimer: Timer? = null
+            alignTimer = TimeUtils.setInterval({
+                checkCount++
+                
+                val p = BedwarsAFK.mc.thePlayer
+                if (p == null) {
+                    alignTimer?.cancel()
+                    Movement.stopForward()
+                    onComplete()
+                    return@setInterval
+                }
+                
+                // Check if we picked up resources
+                val currentIron = best.bedwars.afk.bot.player.Inventory.getIronCount()
+                val currentGold = best.bedwars.afk.bot.player.Inventory.getGoldCount()
+                
+                if (currentIron > initialIron || currentGold > initialGold) {
+                    // Perfect! We picked up resources
+                    alignTimer?.cancel()
+                    Movement.stopForward()
+                    Mouse.stopTracking()
+                    
+                    // Save exact position
+                    generatorPos = p.position
+                    ChatUtils.info("${EnumChatFormatting.GREEN}✓ Aligned! Position saved: ${p.posX.toInt()}, ${p.posY.toInt()}, ${p.posZ.toInt()}")
+                    
+                    isNavigating = false
+                    currentDestination = ""
+                    onComplete()
+                    return@setInterval
+                }
+                
+                // Check current distance
+                val dist = sqrt(
+                    (p.posX - genPos.x - 0.5).pow(2.0) +
+                    (p.posZ - genPos.z - 0.5).pow(2.0)
+                )
+                
+                // If we're within 0.3 blocks, stop and wait for resources
+                if (dist < 0.3) {
+                    alignTimer?.cancel()
+                    Movement.stopForward()
+                    
+                    // Wait a bit for resources to spawn
+                    TimeUtils.setTimeout(fun() {
+                        val finalIron = best.bedwars.afk.bot.player.Inventory.getIronCount()
+                        val finalGold = best.bedwars.afk.bot.player.Inventory.getGoldCount()
+                        
+                        if (finalIron > initialIron || finalGold > initialGold) {
+                            // Got resources!
+                            generatorPos = p.position
+                            ChatUtils.info("${EnumChatFormatting.GREEN}✓ Position locked!")
+                        } else if (retryCount < 4) {
+                            // Retry
+                            ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ No resources, retrying...")
+                            TimeUtils.setTimeout({
+                                goToGenerator(onComplete, retryCount + 1)
+                            }, 500)
+                            return
+                        }
+                        
+                        Mouse.stopTracking()
+                        isNavigating = false
+                        currentDestination = ""
+                        onComplete()
+                    }, 1000)
+                    return@setInterval
+                }
+                
+                // Timeout
+                if (checkCount >= maxChecks) {
+                    alignTimer?.cancel()
+                    Movement.stopForward()
+                    
+                    if (retryCount < 4) {
+                        ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Alignment timeout, retrying...")
+                        TimeUtils.setTimeout({
+                            goToGenerator(onComplete, retryCount + 1)
+                        }, 500)
+                    } else {
+                        Mouse.stopTracking()
+                        isNavigating = false
+                        currentDestination = ""
+                        onComplete()
+                    }
+                }
+            }, 0, 50)
+        }, 200)
     }
     
     /**

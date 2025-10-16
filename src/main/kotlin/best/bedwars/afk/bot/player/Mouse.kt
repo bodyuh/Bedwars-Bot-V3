@@ -57,6 +57,17 @@ object Mouse {
         rClickDown = false
         KeyBinding.setKeyBindState(BedwarsAFK.mc.gameSettings.keyBindUseItem.keyCode, false)
     }
+    
+    /**
+     * Simulate a single right-click (press and release)
+     * This looks like a real player clicking
+     */
+    fun rClick() {
+        startRightClick()
+        best.bedwars.afk.utils.TimeUtils.setTimeout({
+            stopRightClick()
+        }, 50) // 50ms click duration (human-like)
+    }
 
     // Start tracking an entity
     fun startTracking(entity: Entity?) {
