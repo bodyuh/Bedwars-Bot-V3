@@ -2,6 +2,28 @@
 
 A Minecraft 1.8.9 Forge mod that recreates the functionality of the original Bedwars AFKv1 macro bot using Duck Dueller's advanced movement and looking framework.
 
+---
+
+## 🚀 **TODO - Help Wanted!**
+
+We're actively looking for contributors! Here are the priority features that need work:
+
+### High Priority
+- [ ] **Fix pitch/yaw block placement accuracy** - Bot sometimes misses the edge when bridging and falls off. Need more precise edge detection and crosshair positioning.
+- [ ] **Smooth pathfinding movement** - Current movement can be jerky on complex paths. Implement better rotation interpolation and acceleration/deceleration.
+- [ ] **Fix Watchdog flag on bridging** - Bot sends 35+ block placement packets to the same position, triggering anti-cheat. Implement placement cooldown and validation.
+- [ ] **Generator detection & tracking** - Implement automatic generator position detection using pathfinding and save positions for resource collection optimization.
+
+### Contributing
+See the [Contributing Guide](CONTRIBUTING.md) for detailed instructions on getting started with Cursor AI!
+
+**Quick Start:**
+1. Install [Cursor](https://cursor.sh)
+2. Clone: `https://github.com/familiar/Bedwars-Bot-V3.git`
+3. Ask Cursor Agent: *"Read PATHFINDING_GUIDE.md and help me work on [TASK]"*
+
+---
+
 ## Features
 
 - **Automatic Game Management**: Joins bedwars games and handles full game lifecycle
