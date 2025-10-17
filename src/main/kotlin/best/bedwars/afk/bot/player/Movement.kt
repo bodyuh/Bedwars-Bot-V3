@@ -82,6 +82,10 @@ object Movement {
         sneaking = false
         KeyBinding.setKeyBindState(BedwarsAFK.mc.gameSettings.keyBindSneak.keyCode, false)
     }
+    
+    // Aliases for compatibility
+    fun startSneak() = startSneaking()
+    fun stopSneak() = stopSneaking()
 
     fun clearAll() {
         stopForward()

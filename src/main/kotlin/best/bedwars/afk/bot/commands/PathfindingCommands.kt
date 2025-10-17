@@ -29,6 +29,9 @@ object PathfindingCommands {
             "parkour" -> handleParkour(parts)
             "stop" -> handleStop()
             "pos" -> handlePos()
+            "debug" -> handleDebug(parts)
+            "test" -> handleTest()
+            "bridge" -> handleBridge(parts)
             "help", "commands" -> handleHelp()
             else -> {
                 ChatUtils.error("Unknown command: #$command")
@@ -143,25 +146,103 @@ object PathfindingCommands {
         ChatUtils.info("${EnumChatFormatting.GRAY}Yaw: ${player.rotationYaw.toInt()}° Pitch: ${player.rotationPitch.toInt()}°")
     }
     
+    private fun handleDebug(parts: List<String>) {
+        if (parts.size < 2) {
+            ChatUtils.error("Usage: #debug <on|off>")
+            return
+        }
+        
+        val enabled = when (parts[1].lowercase()) {
+            "on", "true", "1" -> true
+            "off", "false", "0" -> false
+            else -> {
+                ChatUtils.error("Usage: #debug <on|off>")
+                return
+            }
+        }
+        
+        AdvancedPathfinder.setDebugMode(enabled)
+    }
+    
+    private fun handleTest() {
+        val player = BedwarsAFK.mc.thePlayer
+        if (player == null) {
+            ChatUtils.error("Player is null!")
+            return
+        }
+        
+        ChatUtils.info("${EnumChatFormatting.YELLOW}━━━ Pathfinding Test Mode ━━━")
+        ChatUtils.info("${EnumChatFormatting.GRAY}Test commands:")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GREEN}Walk around walls:")
+        ChatUtils.info("  ${EnumChatFormatting.WHITE}#goto ~10 ~ ~")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GREEN}Climb up:")
+        ChatUtils.info("  ${EnumChatFormatting.WHITE}#goto ~ ~5 ~")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GREEN}Navigate complex terrain:")
+        ChatUtils.info("  ${EnumChatFormatting.WHITE}#goto ~20 ~10 ~20")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GOLD}Eagle bridging test:")
+        ChatUtils.info("  ${EnumChatFormatting.WHITE}#bridge start ${EnumChatFormatting.GRAY}(Start manual bridging)")
+        ChatUtils.info("  ${EnumChatFormatting.WHITE}#bridge stop ${EnumChatFormatting.GRAY}(Stop bridging)")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GOLD}Tips:")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}• Build a wall and test walking around it")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}• Place blocks at different heights")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}• Use #debug on to see detailed pathfinding info")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}• Green line = calculated path")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}• Red particle = current waypoint")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    }
+    
+    private fun handleBridge(parts: List<String>) {
+        if (parts.size < 2) {
+            ChatUtils.error("Usage: #bridge <start|stop>")
+            return
+        }
+        
+        when (parts[1].lowercase()) {
+            "start" -> {
+                best.bedwars.afk.bot.pathfinding.EagleBridge.startBridging()
+            }
+            "stop" -> {
+                best.bedwars.afk.bot.pathfinding.EagleBridge.stopBridging()
+            }
+            else -> {
+                ChatUtils.error("Usage: #bridge <start|stop>")
+            }
+        }
+    }
+    
     private fun handleHelp() {
         ChatUtils.info("${EnumChatFormatting.YELLOW}━━━━ Pathfinding Commands ━━━━")
         ChatUtils.info("")
         ChatUtils.info("${EnumChatFormatting.GREEN}#goto <x> <y> <z>")
-        ChatUtils.info("  ${EnumChatFormatting.GRAY}Advanced navigation (climbs, towers, bridges)")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}Navigate with obstacle avoidance")
         ChatUtils.info("  ${EnumChatFormatting.WHITE}Examples:")
         ChatUtils.info("    ${EnumChatFormatting.GRAY}#goto 100 64 200")
-        ChatUtils.info("    ${EnumChatFormatting.GRAY}#goto ~ ~10 ~ ${EnumChatFormatting.DARK_GRAY}(tower up 10 blocks)")
-        ChatUtils.info("    ${EnumChatFormatting.GRAY}#goto ~50 ~ ~-30 ${EnumChatFormatting.DARK_GRAY}(climb mountains)")
+        ChatUtils.info("    ${EnumChatFormatting.GRAY}#goto ~ ~5 ~ ${EnumChatFormatting.DARK_GRAY}(jump up 5 blocks)")
+        ChatUtils.info("    ${EnumChatFormatting.GRAY}#goto ~50 ~ ~-30 ${EnumChatFormatting.DARK_GRAY}(navigate around walls)")
         ChatUtils.info("")
         ChatUtils.info("${EnumChatFormatting.GOLD}#parkour <x> <y> <z>")
         ChatUtils.info("  ${EnumChatFormatting.GRAY}Navigate using parkour jumps")
-        ChatUtils.info("  ${EnumChatFormatting.GRAY}Handles gaps and precision jumps")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.AQUA}#bridge <start|stop>")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}Manual eagle bridging control")
         ChatUtils.info("")
         ChatUtils.info("${EnumChatFormatting.GREEN}#stop")
         ChatUtils.info("  ${EnumChatFormatting.GRAY}Stop current pathfinding")
         ChatUtils.info("")
         ChatUtils.info("${EnumChatFormatting.GREEN}#pos")
-        ChatUtils.info("  ${EnumChatFormatting.GRAY}Show current position & status")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}Show current position & rotation")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GREEN}#debug <on|off>")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}Toggle detailed pathfinding logs")
+        ChatUtils.info("")
+        ChatUtils.info("${EnumChatFormatting.GREEN}#test")
+        ChatUtils.info("  ${EnumChatFormatting.GRAY}Show pathfinding test suggestions")
         ChatUtils.info("")
         ChatUtils.info("${EnumChatFormatting.GREEN}#help")
         ChatUtils.info("  ${EnumChatFormatting.GRAY}Show this help message")
