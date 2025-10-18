@@ -37,10 +37,28 @@ object BridgingPathfinder {
     private var startingPosition: BlockPos? = null
     private var savedGeneratorPos: BlockPos? = null
     
+    // Placement spam control - increased cooldown to reduce packets
+    private var lastPlacementPos: BlockPos? = null
+    private var lastPlacementAtMs: Long = 0L
+    
+    // Bridging configuration
+    var enableDiagonalBridging = true // Allow diagonal (faster but less common)
+    var enableSpeedBridging = true // Enable safe speedbridging (sneak + sprint alternate)
+    var placementCooldownMs = 350 // Increased from 250ms to reduce packet spam
+    
+    // Diagnostic flag - printed once on first use
+    private var diagnosticShown = false
+    
+    private fun showDiagnostic() {
+        // Removed - too aggressive
+    }
+    
     /**
      * Find diamond generator and bridge to it
      */
     fun findAndBridgeToDiamondGenerator(onComplete: () -> Unit) {
+        showDiagnostic() // Show diagnostic on first use
+        
         val player = BedwarsAFK.mc.thePlayer
         val world = BedwarsAFK.mc.theWorld
         
@@ -142,6 +160,8 @@ object BridgingPathfinder {
      * Find the nearest specific block type and bridge to it (for testing/keybind use)
      */
     fun findAndBridgeToBlock(blockType: Block, onComplete: () -> Unit) {
+        showDiagnostic() // Show diagnostic on first use
+        
         val player = BedwarsAFK.mc.thePlayer
         val world = BedwarsAFK.mc.theWorld
         
@@ -266,6 +286,7 @@ object BridgingPathfinder {
     
     /**
      * Calculate path that may require bridging
+     * Supports both straight and diagonal bridging
      */
     private fun calculateBridgingPath(start: BlockPos, end: BlockPos): List<BlockPos> {
         val path = mutableListOf<BlockPos>()
@@ -275,22 +296,44 @@ object BridgingPathfinder {
         val dz = end.z - start.z
         val horizontalDist = sqrt((dx * dx + dz * dz).toDouble())
         
-        // Create waypoints every ~3 blocks
-        val steps = (horizontalDist / 3.0).toInt().coerceAtLeast(10)
+        // Determine if this is a diagonal bridge
+        val isDiagonal = abs(dx) > 2 && abs(dz) > 2
         
-        for (i in 0..steps) {
-            val progress = i.toDouble() / steps
-            val x = (start.x + dx * progress).toInt()
-            val z = (start.z + dz * progress).toInt()
+        if (!enableDiagonalBridging && isDiagonal) {
+            // If diagonal disabled, use L-shaped path (cardinal directions only)
+            ChatUtils.info("§6[Bridge] §7Using L-shaped path (diagonal disabled)")
             
-            // Gradually adjust Y
-            val y = (start.y + (end.y - start.y) * progress).toInt()
+            // First leg: move in X direction
+            val midX = end.x
+            val midY = start.y
+            val midZ = start.z
+            path.add(BlockPos(midX, midY, midZ))
             
-            path.add(BlockPos(x, y, z))
+            // Second leg: move in Z direction to target
+            path.add(end)
+        } else {
+            // Use direct path (diagonal if needed)
+            if (isDiagonal) {
+                ChatUtils.info("§6[Bridge] §7Using diagonal bridging path")
+            }
+            
+            // Create waypoints every ~3 blocks for smooth bridging
+            val steps = (horizontalDist / 3.0).toInt().coerceAtLeast(10)
+            
+            for (i in 0..steps) {
+                val progress = i.toDouble() / steps
+                val x = (start.x + dx * progress).toInt()
+                val z = (start.z + dz * progress).toInt()
+                
+                // Gradually adjust Y
+                val y = (start.y + (end.y - start.y) * progress).toInt()
+                
+                path.add(BlockPos(x, y, z))
+            }
+            
+            // Always end at the target
+            path.add(end)
         }
-        
-        // Always end at the target
-        path.add(end)
         
         return path
     }
@@ -391,12 +434,30 @@ object BridgingPathfinder {
         val dz = target.z + 0.5 - player.posZ
         val targetYaw = (atan2(dz, dx) * 180.0 / Math.PI - 90.0).toFloat()
         
-        // Face OPPOSITE direction (180 degrees) for human-like bridging
-        val bridgingYaw = targetYaw + 180f
-        player.rotationYaw = bridgingYaw
+        // Determine if this is a diagonal bridge
+        val absDx = abs(dx)
+        val absDz = abs(dz)
+        val isDiagonal = absDx > 1.5 && absDz > 1.5 // Both X and Z movement significant
         
-        // Look down for bridging (pitch ~75-80)
-        player.rotationPitch = 78f
+        // Set yaw and pitch based on bridge type
+        if (isDiagonal) {
+            // DIAGONAL BRIDGE: Use fixed angles based on direction
+            // Since we move BACKWARDS (S key), we face OPPOSITE of movement direction
+            val diagonalYaw = when {
+                dx > 0 && dz > 0 -> -45f   // Moving SE, face NW (opposite)
+                dx > 0 && dz < 0 -> 45f  // Moving NE, face SW (opposite)
+                dx < 0 && dz > 0 -> -135f    // Moving SW, face NE (opposite)
+                else -> 135f               // Moving NW, face SE (opposite)
+            }
+            player.rotationYaw = diagonalYaw
+            player.rotationPitch = 77f
+        } else {
+            // STRAIGHT BRIDGE: Face opposite direction
+            val bridgingYaw = targetYaw + 180f
+            player.rotationYaw = bridgingYaw
+            player.rotationPitch = 83f // Steeper for straight bridges
+            ChatUtils.info("§6[Bridge] §7Straight bridge at yaw=${bridgingYaw.toInt()}°, pitch=83°")
+        }
         
         // Equip wool
         if (!equipWool()) {
@@ -409,13 +470,18 @@ object BridgingPathfinder {
         
         // Start bridging sequence - WALK BACKWARDS (hold S)
         Movement.startBackward() // This is the key for human-like bridging!
-        Movement.startSneaking() // Sneak for safety
+        Movement.startSneaking() // Sneak for safety initially
         
         var bridgeTimer: Timer? = null
         var checkCount = 0
         var lastPlacementTime = System.currentTimeMillis()
         var consecutiveFailures = 0
         val maxChecks = 150 // 7.5 seconds max
+        
+        // Safe speedbridge variables (only for straight bridges)
+        var speedbridgeCycle = 0 // Counter for sneak/sprint alternation
+        var lastSpeedbridgeToggle = System.currentTimeMillis()
+        val useSpeedbridge = !isDiagonal // Only speedbridge on straight bridges
         
         bridgeTimer = TimeUtils.setInterval({
             checkCount++
@@ -430,9 +496,41 @@ object BridgingPathfinder {
                 return@setInterval
             }
             
+            // SAFE SPEEDBRIDGE MODE: Alternate between sneak and unsneak
+            // This is much safer than full speedbridging but faster than pure eagle
+            // ONLY on straight bridges (diagonal uses pure sneak for safety)
+            if (enableSpeedBridging && useSpeedbridge && p.onGround) {
+                val timeSinceToggle = System.currentTimeMillis() - lastSpeedbridgeToggle
+                
+                // Cycle: Sneak for 400ms, unsneak for 150ms, repeat
+                // This keeps the player mostly safe while gaining some speed
+                when {
+                    speedbridgeCycle == 0 && timeSinceToggle > 400 -> {
+                        // Switch to unsneak phase (faster movement)
+                        Movement.stopSneaking()
+                        speedbridgeCycle = 1
+                        lastSpeedbridgeToggle = System.currentTimeMillis()
+                        ChatUtils.info("§6[Speedbridge] §eUnsneak (${timeSinceToggle}ms sneak)")
+                    }
+                    speedbridgeCycle == 1 && timeSinceToggle > 150 -> {
+                        // Back to sneak phase (safe)
+                        Movement.startSneaking()
+                        speedbridgeCycle = 0
+                        lastSpeedbridgeToggle = System.currentTimeMillis()
+                        ChatUtils.info("§6[Speedbridge] §7Sneak (${timeSinceToggle}ms unsneak)")
+                    }
+                }
+            }
+            
             // Check if we're still on solid ground (safety check)
             val blockBelow = w.getBlockState(p.position.down()).block
             if (blockBelow.material == Material.air) {
+                // CRITICAL: We're in the air! Force sneak immediately and place block
+                if (enableSpeedBridging && useSpeedbridge && !p.isSneaking) {
+                    Movement.startSneaking()
+                    speedbridgeCycle = 0 // Reset cycle
+                }
+                
                 // We're in the air! Try to place block immediately
                 val placed = placeBlockBehind(p, w)
                 if (!placed) {
@@ -444,6 +542,7 @@ object BridgingPathfinder {
                         ChatUtils.error("Can't place blocks after 40 attempts! Stopping to prevent void fall")
                         bridgeTimer?.cancel()
                         Movement.stopBackward()
+                        Movement.stopSprinting()
                         // Keep sneaking for safety!
                         TimeUtils.setTimeout({
                             Movement.stopSneaking()
@@ -458,9 +557,9 @@ object BridgingPathfinder {
                 consecutiveFailures = 0
             }
             
-            // Try to place block every ~250ms (more human-like timing)
+            // Try to place block with configurable cooldown (reduces packet spam)
             val currentTime = System.currentTimeMillis()
-            if (currentTime - lastPlacementTime >= 250) {
+            if (currentTime - lastPlacementTime >= placementCooldownMs) {
                 val placed = placeBlockBehind(p, w)
                 if (placed) {
                     lastPlacementTime = currentTime
@@ -470,26 +569,33 @@ object BridgingPathfinder {
             // Check if we reached the waypoint
             val dist = p.getDistance(target.x + 0.5, target.y.toDouble(), target.z + 0.5)
             
-            if (dist < 2.5 || checkCount >= maxChecks) {
+            // Tighter completion threshold to avoid stopping shy of the target
+            if (dist < 1.0 || checkCount >= maxChecks) {
                 bridgeTimer?.cancel()
                 
-                // CRITICAL: Stop movement BEFORE unshifting to prevent void fall!
+                // CRITICAL: Stop ALL movement BEFORE unshifting to prevent void fall!
                 Movement.stopBackward()
+                Movement.stopSprinting() // Stop speedbridge sprint if active
                 
                 // Wait for movement to stop, THEN unshift
                 TimeUtils.setTimeout({
                     Movement.stopSneaking()
                     Mouse.stopTracking()
                     
-                    if (dist < 2.5) {
+                    if (dist < 1.0) {
                         ChatUtils.info("${EnumChatFormatting.GREEN}✓ Bridge complete!")
                     } else {
                         ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Bridge timeout")
                     }
                     
-                    TimeUtils.setTimeout({
-                        onComplete()
-                    }, 200)
+                    // Final nudge to stand on the destination block center if close
+                    if (dist < 1.0) {
+                        AdvancedPathfinder.goTo(target.x, target.y, target.z) {
+                            onComplete()
+                        }
+                    } else {
+                        TimeUtils.setTimeout({ onComplete() }, 200)
+                    }
                 }, 300) // Wait 300ms for movement to fully stop
             }
         }, 0, 50)
@@ -508,6 +614,12 @@ object BridgingPathfinder {
         if (world.getBlockState(placePos).block.material != Material.air) {
             return true // Block already exists, success
         }
+
+        // De-duplication: avoid spamming the same air position within cooldown window
+        val now = System.currentTimeMillis()
+        if (lastPlacementPos != null && lastPlacementPos == placePos && (now - lastPlacementAtMs) < placementCooldownMs) {
+            return false
+        }
         
         // Equip wool first
         if (!equipWool()) return false
@@ -517,6 +629,10 @@ object BridgingPathfinder {
         
         // Try to find a solid block adjacent to place on
         val placementInfo = findPlacementSurface(placePos, world)
+        if (placementInfo == null) {
+            // Nothing to place against; skip this tick
+            return false
+        }
         
         // HUMAN-LIKE PLACEMENT: Just simulate a right-click!
         // The server will handle block placement based on:
@@ -532,6 +648,8 @@ object BridgingPathfinder {
         
         // Simulate right-click (50ms press)
         Mouse.rClick()
+        lastPlacementPos = placePos
+        lastPlacementAtMs = now
         
         // Small delay to let the server process
         // We return true immediately to keep bridging smooth

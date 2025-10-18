@@ -354,3 +354,90 @@ The bot now has full eagle bridging capability:
 
 The foundation is complete for automatic bridging during pathfinding. Next step is to implement void detection and automatic BRIDGE node generation!
 
+---
+
+## 🆕 Diagonal Bridging Update (October 2025)
+
+### **Fixed: 180° Angle Error**
+
+**Problem Discovered:**
+- Diagonal bridges were going in the **exact opposite direction** (180° off)
+- Bot would face NW when trying to go SE, etc.
+- Made diagonal bridging completely broken
+
+**Root Cause:**
+- Incorrect angle calculations in `AdvancedPathfinder.kt`
+- Angles were set to face OPPOSITE of movement direction
+- Bot moves BACKWARDS (S key) during bridging, so angles need to match movement
+
+**Solution Implemented:**
+```kotlin
+// Corrected angles for diagonal bridging:
+when {
+    diffX > 0 && diffZ > 0 -> -45f   // Moving SE, face SE
+    diffX > 0 && diffZ < 0 -> 45f    // Moving NE, face NE
+    diffX < 0 && diffZ > 0 -> -135f  // Moving SW, face SW
+    else -> 135f                     // Moving NW, face NW
+}
+```
+
+### **Diagonal Bridging Mechanics**
+
+**How It Works Now:**
+1. **Detect diagonal bridge** - Both X and Z movement > 0.5
+2. **Lock angle instantly** - No smooth interpolation (prevents drift)
+3. **Set pitch to 77°** - Optimal downward visibility
+4. **Hold S key** - Backward movement
+5. **Always sneak** - No speedbridge on diagonals (safer)
+6. **Place blocks** - EagleBridge module handles placement
+
+**Key Differences from Straight Bridges:**
+| Feature | Straight Bridge | Diagonal Bridge |
+|---------|----------------|-----------------|
+| **Angle** | Calculated + 180° | Fixed diagonal (-45°, 45°, -135°, 135°) |
+| **Rotation** | Smooth interpolation | Instant lock |
+| **Speedbridge** | Yes (sneak/unsneak cycle) | No (always sneak) |
+| **Pitch** | 83° (steeper) | 77° (shallower) |
+
+**Angle Reference:**
+```
+         North (0°)
+              |
+  NW (135°)   |   NE (45°)
+      \       |       /
+       \      |      /
+        \     |     /
+West ----+----+----+---- East
+(-180°)  |    |    |    (0°)
+        /     |     \
+       /      |      \
+      /       |       \
+  SW (-135°)  |   SE (-45°)
+              |
+         South (180°)
+```
+
+**Testing Diagonal Bridges:**
+```
+1. Place two platforms diagonally (e.g., 10 blocks SE)
+2. Stand on first platform
+3. Use #goto to navigate to second platform
+4. Bot will:
+   - Detect diagonal path needed
+   - Lock to -45° (SE direction)
+   - Hold S + sneak + place blocks
+   - Bridge perfectly diagonally
+```
+
+### **Code Location:**
+- **File:** `AdvancedPathfinder.kt`
+- **Lines:** 1093-1102 (angle calculation)
+- **Lines:** 1119-1121 (instant angle lock for diagonals)
+- **Lines:** 1156-1182 (diagonal sneak logic)
+
+### **Performance Notes:**
+- Diagonal bridges are **√2 times longer** than straight bridges (~1.41x distance)
+- Bot always sneaks on diagonals (no speedbridge) for safety
+- Block placement same as straight bridges (uses EagleBridge module)
+- Angle lock prevents drift that was causing falls
+

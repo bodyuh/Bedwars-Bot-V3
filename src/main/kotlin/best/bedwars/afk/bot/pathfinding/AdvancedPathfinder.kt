@@ -34,7 +34,8 @@ object AdvancedPathfinder {
         var g: Double,
         val h: Double,
         val needsBlockPlace: Boolean = false,
-        val actionType: ActionType = ActionType.WALK
+        val actionType: ActionType = ActionType.WALK,
+        val isMandatory: Boolean = false // For tight elevation areas - MUST step on this exact block
     ) : Comparable<Node> {
         val f: Double get() = g + h
         override fun compareTo(other: Node): Int = f.compareTo(other.f)
@@ -45,7 +46,9 @@ object AdvancedPathfinder {
         JUMP,       // Jumping up 1-2 blocks
         FALL,       // Falling down safely
         SPRINT,     // Sprint jumping
-        BRIDGE      // Eagle bridging across void
+        BRIDGE,     // Eagle bridging across void
+        PILLAR_UP,  // Pillaring/towering up by placing blocks
+        DROP_DOWN   // Dropping down < 4 blocks
     }
 
     private var currentPath: List<Node>? = null
@@ -61,6 +64,16 @@ object AdvancedPathfinder {
     private var isTransitioningFromBridge = false
     private var waitingForRotation = false
     private var bridgeSafetyNodesRemaining = 0 // Counter for +2 safety nodes after bridge section
+    
+    // Speedbridge tracking (for straight bridges only)
+    private var speedbridgeCycle = 0 // 0 = sneak, 1 = sprint
+    private var lastSpeedbridgeToggle = 0L
+    
+    // Configurable pathfinding parameters
+    var pathRecomputeTimeoutSeconds = 2.0 // Time before recomputing path if waypoint not reached
+    var denseVerticalWaypoints = true // Add intermediate nodes when climbing
+    var sprintJumpMinDistance = 3 // Minimum horizontal distance to allow sprint jumping on Y changes
+    var enableSpeedBridging = true // Safe speedbridge on straight bridges
 
     fun goTo(x: Int, y: Int, z: Int, onComplete: () -> Unit) {
         val player = BedwarsAFK.mc.thePlayer ?: return
@@ -151,7 +164,7 @@ object AdvancedPathfinder {
         openSet[start] = startNode
 
         var iterations = 0
-        val maxIterations = 10000 // Increased for better pathfinding
+        val maxIterations = 20000 // Increased to 20k for complex paths with pillaring/dropping
 
         while (openList.isNotEmpty() && iterations < maxIterations) {
             iterations++
@@ -239,12 +252,29 @@ object AdvancedPathfinder {
             // Check jump up 1 block
             else if (canJumpTo(world, pos, neighborPos)) {
                 val jumpPos = neighborPos.up()
-                neighbors.add(Node(jumpPos, current, 0.0, 0.0, false, ActionType.JUMP))
+                
+                // If dense vertical waypoints enabled, add intermediate node at current Y level first
+                if (denseVerticalWaypoints) {
+                    // Add a "step" node at the base before going up - MANDATORY to step on
+                    val stepBasePos = neighborPos
+                    if (canWalkTo(world, pos, stepBasePos.down())) {
+                        neighbors.add(Node(stepBasePos.down(), current, 0.0, 0.0, false, ActionType.WALK, isMandatory = true))
+                    }
+                }
+                
+                // Mark the elevated position as mandatory too - need precise foot placement
+                neighbors.add(Node(jumpPos, current, 0.0, 0.0, false, ActionType.JUMP, isMandatory = true))
             }
-            // Check jump up 2 blocks (sprint jump)
+            // Check jump up 2 blocks (sprint jump) - only if distance >= sprintJumpMinDistance
+            // This requires jump + place block mechanic
             else if (canJumpTo(world, pos, neighborPos.up())) {
                 val jumpPos = neighborPos.up(2)
-                neighbors.add(Node(jumpPos, current, 0.0, 0.0, false, ActionType.SPRINT))
+                val horizontalDist = sqrt((dir.x * dir.x + dir.z * dir.z).toDouble())
+                
+                // Use JUMP instead of SPRINT if too close
+                // For 2-block jumps, mark as needing block placement
+                val actionType = if (horizontalDist < sprintJumpMinDistance) ActionType.JUMP else ActionType.SPRINT
+                neighbors.add(Node(jumpPos, current, 0.0, 0.0, true, actionType, isMandatory = true))
             }
         }
 
@@ -265,6 +295,18 @@ object AdvancedPathfinder {
             if (canJumpUp(world, pos, height)) {
                 val actionType = if (height == 1) ActionType.JUMP else ActionType.SPRINT
                 neighbors.add(Node(upPos, current, 0.0, 0.0, false, actionType))
+            }
+        }
+        
+        // Check pillaring up (placing blocks to climb vertically)
+        // Only if we have blocks and need to go higher than 2 blocks
+        if (EagleBridge.getBlockCount() > 0) {
+            for (pillarHeight in 3..10) {
+                val pillarPos = pos.up(pillarHeight)
+                if (canPillarUp(world, pos, pillarHeight)) {
+                    neighbors.add(Node(pillarPos, current, 0.0, 0.0, true, ActionType.PILLAR_UP, isMandatory = true))
+                    break // Only add one pillar height
+                }
             }
         }
 
@@ -373,24 +415,36 @@ object AdvancedPathfinder {
         // Check if target position is walkable
         if (!isPositionWalkable(world, to)) return false
 
-        // Check if there's a block in the way (collision check)
-        val blockAt = world.getBlockState(to).block
-        val blockAbove = world.getBlockState(to.up()).block
-        
-        // Can't walk if there's a solid block at feet or head level
-        if (blockAt.material.isSolid || blockAbove.material.isSolid) return false
-
-        // Check for diagonal movement collision
+        // Strict forward collision check along the movement vector to avoid planning through thin walls
         val dx = to.x - from.x
         val dz = to.z - from.z
+        val stepCount = Math.max(Math.abs(dx), Math.abs(dz))
+        if (stepCount > 0) {
+            val stepX = Integer.signum(dx)
+            val stepZ = Integer.signum(dz)
+            var cx = from.x
+            var cz = from.z
+            for (i in 1..stepCount) {
+                cx += stepX
+                cz += stepZ
+                val check = BlockPos(cx, from.y, cz)
+                val feet = world.getBlockState(check).block
+                val head = world.getBlockState(check.up()).block
+                if (!isPassable(feet) || !isPassable(head)) return false
+            }
+        }
+
+        // Check for diagonal movement collision
+        val dx2 = to.x - from.x
+        val dz2 = to.z - from.z
         
         // If moving diagonally, check both cardinal directions are clear
-        if (dx != 0 && dz != 0) {
+        if (dx2 != 0 && dz2 != 0) {
             // Moving diagonally - need to check both sides
             // Example: Moving NE (1, 0, -1) needs to check N (0, 0, -1) and E (1, 0, 0)
             
-            val sideX = from.add(dx, 0, 0) // Check X direction
-            val sideZ = from.add(0, 0, dz) // Check Z direction
+            val sideX = from.add(dx2, 0, 0) // Check X direction
+            val sideZ = from.add(0, 0, dz2) // Check Z direction
             
             // Check if either side is blocked at feet or head level
             val blockSideX = world.getBlockState(sideX).block
@@ -521,14 +575,42 @@ object AdvancedPathfinder {
         // Check if landing position is walkable
         return isPositionWalkable(world, pos.down(fallDistance))
     }
+    
+    /**
+     * Check if we can pillar up by placing blocks
+     */
+    private fun canPillarUp(world: World, pos: BlockPos, height: Int): Boolean {
+        // Must have blocks to place
+        if (EagleBridge.getBlockCount() == 0) return false
+        
+        // Check all blocks in the pillar path
+        for (i in 1..height) {
+            val checkPos = pos.up(i)
+            // Need 2 blocks of space at each level (for player + head)
+            val block = world.getBlockState(checkPos).block
+            val blockAbove = world.getBlockState(checkPos.up()).block
+            
+            // Must have air to place blocks into
+            if (block.material.isSolid || blockAbove.material.isSolid) return false
+        }
+        
+        // Target position should have space (we'll place blocks below it)
+        val targetPos = pos.up(height)
+        val feetBlock = world.getBlockState(targetPos).block
+        val headBlock = world.getBlockState(targetPos.up()).block
+        
+        return isPassable(feetBlock) && isPassable(headBlock)
+    }
 
     /**
      * Check if a position is walkable (has solid ground and passable air above)
      */
     private fun isPositionWalkable(world: World, pos: BlockPos): Boolean {
-        val groundBlock = world.getBlockState(pos).block
-        val feetBlock = world.getBlockState(pos.up()).block
-        val headBlock = world.getBlockState(pos.up(2)).block
+        // Ground is the block BELOW the standing position
+        val groundBlock = world.getBlockState(pos.down()).block
+        // Feet occupy the standing block; head is one above
+        val feetBlock = world.getBlockState(pos).block
+        val headBlock = world.getBlockState(pos.up()).block
 
         // Must have solid ground to stand on
         val hasSolidGround = groundBlock.material.isSolid
@@ -585,6 +667,8 @@ object AdvancedPathfinder {
             ActionType.SPRINT -> distance * 1.5    // Higher penalty for sprint jumping
             ActionType.FALL -> distance * 0.8      // Falling is faster
             ActionType.BRIDGE -> distance * 2.0    // Bridging is slow and risky
+            ActionType.PILLAR_UP -> distance * 2.5 // Pillaring is slow but reliable
+            ActionType.DROP_DOWN -> distance * 0.7 // Dropping is fast but risky
         }
     }
 
@@ -717,6 +801,10 @@ object AdvancedPathfinder {
 
         var tickCount = 0
         var lastJumpTime = 0L
+        var lastStuckCheckPos: BlockPos? = null
+        var ticksSinceLastMove = 0
+        var waypointStartTime = System.currentTimeMillis()
+        var lastWaypointIndex = currentPathIndex
         stuckCounter = 0
         lastPlayerPos = null
         
@@ -744,6 +832,88 @@ object AdvancedPathfinder {
                         cancel()
                         onComplete()
                         return
+                    }
+
+                    // Continuous stuck detection: if player hasn't moved for 20 ticks (1 second)
+                    // DISABLED during bridging to avoid interference
+                    if (!bridgeModeActive) {
+                        val currentBlockPos = BlockPos(player.posX, player.posY, player.posZ)
+                        if (lastStuckCheckPos == null || currentBlockPos != lastStuckCheckPos) {
+                            lastStuckCheckPos = currentBlockPos
+                            ticksSinceLastMove = 0
+                        } else {
+                            ticksSinceLastMove++
+                            // If stuck for 20 ticks and on ground, place block under and force jump
+                            if (ticksSinceLastMove >= 20 && player.onGround && System.currentTimeMillis() - lastJumpTime > 500) {
+                                if (debugMode) ChatUtils.info("§e[Pathfinder] §7Stuck detected - looking down, placing block, jumping")
+                                
+                                // Store current rotation FIRST
+                                val originalYaw = player.rotationYaw
+                                val originalPitch = player.rotationPitch
+                                
+                                // Look down and try to place a block under the player to help escape
+                                val blockUnder = BlockPos(player.posX, player.posY - 1, player.posZ)
+                                if (world.getBlockState(blockUnder).block.material == Material.air) {
+                                    // Switch to blocks
+                                    if (EagleBridge.switchToBlocks()) {
+                                        // FIRST: Look straight down
+                                        player.rotationPitch = 90f
+                                        Thread.sleep(100) // Wait longer for rotation to fully apply
+                                        
+                                        // SECOND: Place block
+                                        player.swingItem()
+                                        Mouse.rClick()
+                                        Thread.sleep(100) // Wait for server to process placement
+                                        
+                                        // THIRD: Jump while looking down (more effective)
+                                        player.jump()
+                                        Thread.sleep(50)
+                                        
+                                        // FOURTH: Restore rotation
+                                        player.rotationYaw = originalYaw
+                                        player.rotationPitch = originalPitch
+                                    }
+                                } else {
+                                    // Block already there, just jump
+                                    player.jump()
+                                }
+                                
+                                lastJumpTime = System.currentTimeMillis()
+                                ticksSinceLastMove = 0
+                            }
+                        }
+                    }
+                    
+                    // Path recomputation: if waypoint hasn't been reached in timeout, recompute
+                    if (currentPathIndex != lastWaypointIndex) {
+                        // Advanced to new waypoint, reset timer
+                        waypointStartTime = System.currentTimeMillis()
+                        lastWaypointIndex = currentPathIndex
+                    } else {
+                        // Check if timeout exceeded (but NOT during bridging)
+                        val elapsed = (System.currentTimeMillis() - waypointStartTime) / 1000.0
+                        if (elapsed >= pathRecomputeTimeoutSeconds && !bridgeModeActive) {
+                            if (debugMode) ChatUtils.info("§e[Pathfinder] §7Waypoint timeout - recomputing path")
+                            // Recompute path from current position
+                            val start = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
+                            val originalEnd = path[path.size - 1].pos
+                            cancel()
+                            stop()
+                            Thread {
+                                val newPath = findPath3D(world, start, originalEnd)
+                                if (newPath != null && newPath.size > 1) {
+                                    currentPath = newPath
+                                    currentPathIndex = 0
+                                    PathRenderer.setPath(newPath.map { it.pos })
+                                    PathRenderer.setWaypointIndex(0)
+                                    followPath(onComplete)
+                                } else {
+                                    if (debugMode) ChatUtils.error("§c[Pathfinder] Recomputation failed")
+                                    onComplete()
+                                }
+                            }.start()
+                            return
+                        }
                     }
 
                     // Handle transition pause from bridge mode
@@ -834,11 +1004,30 @@ object AdvancedPathfinder {
                     }
 
                     // Check if reached waypoint
-                    // Use stricter tolerance when in bridge mode and on last bridge node or safety nodes
+                    // Accept both feet contact (diffY check) AND head contact (player head within node bounds)
                     val isInBridgeEndPhase = bridgeModeActive && 
                                              (currentNode.actionType != ActionType.BRIDGE || bridgeSafetyNodesRemaining > 0)
                     val distanceThreshold = if (isInBridgeEndPhase) 0.3 else 0.8 // Stricter for bridge end
-                    val reachedWaypoint = horizontalDistance < distanceThreshold && abs(diffY) < 1.5
+                    
+                    // For MANDATORY nodes (tight elevation areas), require EXACT foot placement
+                    val reachedWaypoint = if (currentNode.isMandatory) {
+                        // Mandatory: player's feet must be ON this exact block
+                        val playerFeetBlockPos = BlockPos(player.posX, player.posY - 0.1, player.posZ)
+                        playerFeetBlockPos.x == target.x && 
+                        playerFeetBlockPos.z == target.z && 
+                        abs(player.posY - (target.y + 1.0)) < 0.3 // Within 0.3 blocks of standing height
+                    } else {
+                        // Normal nodes: accept either feet or head contact
+                        val feetReached = horizontalDistance < distanceThreshold && abs(diffY) < 1.5
+                        
+                        val playerHeadY = player.posY + 1.8 // Player eye height
+                        val nodeBlockMinY = target.y.toDouble()
+                        val nodeBlockMaxY = target.y + 1.0
+                        val headReached = horizontalDistance < distanceThreshold && 
+                                          playerHeadY >= nodeBlockMinY && playerHeadY <= nodeBlockMaxY
+                        
+                        feetReached || headReached
+                    }
                     
                     if (reachedWaypoint) {
                         // Detect when we finish the last BRIDGE node - start safety counter
@@ -893,32 +1082,60 @@ object AdvancedPathfinder {
                     var targetYaw = Math.toDegrees(Math.atan2(diffZ, diffX)).toFloat() - 90f
                     var targetPitch = 0f
                     
-                    // If eagle bridging is ACTIVE (regardless of node type), use BridgingPathfinder approach:
-                    // - Face OPPOSITE direction (180 degrees)
-                    // - Look DOWN (pitch ~82-85 to properly see the edge)
+                    // If eagle bridging is ACTIVE (regardless of node type), use proper bridging angles
                     // This allows extending bridge mode past the last BRIDGE node if still over void
                     if (bridgeModeActive) {
-                        targetYaw += 180f // Face backwards
-                        if (targetYaw > 180f) targetYaw -= 360f
-                        if (targetYaw < -180f) targetYaw += 360f
-                        targetPitch = 83f // Look down more to see edge and place properly
+                        // Determine if this is a diagonal bridge based on movement direction
+                        val absDiffX = abs(diffX)
+                        val absDiffZ = abs(diffZ)
+                        val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5 // Both X and Z movement
+                        
+                        if (isDiagonalBridge) {
+                            // DIAGONAL BRIDGE: Use fixed angles based on direction quadrant
+                            // Since we're moving BACKWARDS (S key), we face OPPOSITE of movement direction
+                            targetYaw = when {
+                                diffX > 0 && diffZ > 0 -> 135f   // Moving SE, face SE (flipped 180°)
+                                diffX > 0 && diffZ < 0 -> 45f    // Moving NE, face NE (flipped 180°)
+                                diffX < 0 && diffZ > 0 -> -135f  // Moving SW, face SW (flipped 180°)
+                                else -> -45f                     // Moving NW, face NW (flipped 180°)
+                            }
+                            targetPitch = 77f // Shallower for diagonal visibility
+                        } else {
+                            // STRAIGHT BRIDGE: Face opposite direction
+                            targetYaw += 180f // Face backwards
+                            if (targetYaw > 180f) targetYaw -= 360f
+                            if (targetYaw < -180f) targetYaw += 360f
+                            targetPitch = 83f // Steeper for straight bridges
+                        }
                     }
                     
-                    // Smooth rotation interpolation to prevent jerky movements
-                    val currentYaw = player.rotationYaw
-                    var yawDiff = targetYaw - currentYaw
+                    // Determine if this is a diagonal bridge (for rotation locking)
+                    val absDiffX = abs(diffX)
+                    val absDiffZ = abs(diffZ)
+                    val isDiagonalBridge = bridgeModeActive && absDiffX > 0.5 && absDiffZ > 0.5
                     
-                    // Normalize to [-180, 180] to take shortest path
-                    while (yawDiff > 180f) yawDiff -= 360f
-                    while (yawDiff < -180f) yawDiff += 360f
-                    
-                    // Smooth interpolation: rotate gradually instead of instantly
-                    // Use 50% interpolation for responsive but smooth movement
-                    val smoothingFactor = 0.5f
-                    val newYaw = currentYaw + (yawDiff * smoothingFactor)
-                    
-                    // Apply yaw rotation
-                    player.rotationYaw = newYaw
+                    // For diagonal bridges, lock angle immediately without interpolation
+                    // For normal movement, use smooth interpolation
+                    if (isDiagonalBridge) {
+                        // Instant rotation lock for diagonal bridges
+                        player.rotationYaw = targetYaw
+                    } else {
+                        // Smooth rotation interpolation to prevent jerky movements
+                        val currentYaw = player.rotationYaw
+                        var yawDiff = targetYaw - currentYaw
+                        
+                        // Normalize to [-180, 180] to take shortest path
+                        while (yawDiff > 180f) yawDiff -= 360f
+                        while (yawDiff < -180f) yawDiff += 360f
+                        
+                        // Smooth interpolation: rotate gradually instead of instantly
+                        // Use 50% interpolation for responsive but smooth movement
+                        val smoothingFactor = 0.5f
+                        val newYaw = currentYaw + (yawDiff * smoothingFactor)
+                        
+                        // Apply yaw rotation
+                        player.rotationYaw = newYaw
+                    }
                     
                     // Set pitch
                     if (bridgeModeActive) {
@@ -932,12 +1149,51 @@ object AdvancedPathfinder {
                         // TRUE EAGLE BRIDGING: Move backwards while shifting
                         Movement.stopForward()
                         Movement.startBackward()
-                        Movement.stopSprinting() // Never sprint while eagle bridging
+                        
+                        // Determine if this is diagonal or straight bridge for speedbridge
+                        val absDiffX = abs(diffX)
+                        val absDiffZ = abs(diffZ)
+                        val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5
+                        
+                        // SAFE SPEEDBRIDGE (straight bridges only)
+                        // Alternates between sneaking (safe) and unsneaking (faster)
+                        if (enableSpeedBridging && !isDiagonalBridge && player.onGround) {
+                            val timeSinceToggle = currentTime - lastSpeedbridgeToggle
+                            
+                            when {
+                                speedbridgeCycle == 0 && timeSinceToggle > 400 -> {
+                                    // Switch to unsneak phase (faster movement)
+                                    Movement.stopSneaking()
+                                    speedbridgeCycle = 1
+                                    lastSpeedbridgeToggle = currentTime
+                                    if (debugMode) ChatUtils.info("§6[Speedbridge] §eUnsneak")
+                                }
+                                speedbridgeCycle == 1 && timeSinceToggle > 150 -> {
+                                    // Back to sneak phase (safe)
+                                    Movement.startSneaking()
+                                    speedbridgeCycle = 0
+                                    lastSpeedbridgeToggle = currentTime
+                                    if (debugMode) ChatUtils.info("§6[Speedbridge] §7Sneak")
+                                }
+                            }
+                        } else {
+                            // No speedbridge on diagonal or if disabled - always sneak
+                            Movement.startSneaking()
+                        }
                     } else {
                         // Normal forward movement
                         Movement.stopBackward()
                         Movement.startForward()
-                        Movement.startSprinting()
+                        
+                        // Don't sprint on mandatory nodes (tight elevation areas) or Y-changing nodes
+                        val hasElevationChange = currentNode.actionType == ActionType.JUMP || 
+                                                currentNode.actionType == ActionType.SPRINT ||
+                                                abs(diffY) > 0.5
+                        if (currentNode.isMandatory || hasElevationChange) {
+                            Movement.stopSprinting()
+                        } else {
+                            Movement.startSprinting()
+                        }
                     }
 
                     // Handle movement based on action type
@@ -945,13 +1201,42 @@ object AdvancedPathfinder {
                         ActionType.JUMP -> {
                             // Jump if we're close to the target and on ground
                             if (horizontalDistance < 1.5 && player.onGround && currentTime - lastJumpTime > 500) {
+                                // If this node needs block placement (2-block jump), place block below while jumping
+                                if (currentNode.needsBlockPlace) {
+                                    val blockUnder = BlockPos(player.posX, player.posY - 1, player.posZ)
+                                    if (world.getBlockState(blockUnder).block.material == Material.air) {
+                                        if (EagleBridge.switchToBlocks()) {
+                                            val originalPitch = player.rotationPitch
+                                            player.rotationPitch = 90f
+                                            Thread.sleep(30)
+                                            player.swingItem()
+                                            Mouse.rClick()
+                                            player.rotationPitch = originalPitch
+                                        }
+                                    }
+                                }
                                 player.jump()
                                 lastJumpTime = currentTime
                             }
                         }
                         ActionType.SPRINT -> {
                             // Sprint jump for 2-block heights
+                            // NOTE: Sprint disabled on Y-changes < 3 blocks due to neighbor generation logic
                             if (horizontalDistance < 1.5 && player.onGround && currentTime - lastJumpTime > 500) {
+                                // If this node needs block placement (2-block jump), place block below while jumping
+                                if (currentNode.needsBlockPlace) {
+                                    val blockUnder = BlockPos(player.posX, player.posY - 1, player.posZ)
+                                    if (world.getBlockState(blockUnder).block.material == Material.air) {
+                                        if (EagleBridge.switchToBlocks()) {
+                                            val originalPitch = player.rotationPitch
+                                            player.rotationPitch = 90f
+                                            Thread.sleep(30)
+                                            player.swingItem()
+                                            Mouse.rClick()
+                                            player.rotationPitch = originalPitch
+                                        }
+                                    }
+                                }
                                 player.jump()
                                 lastJumpTime = currentTime
                             }
@@ -960,15 +1245,27 @@ object AdvancedPathfinder {
                             // Just walk forward and let gravity do its thing
                         }
                         ActionType.WALK -> {
-                            // Auto-jump if there's a block in front
-                            if (player.onGround && player.isCollidedHorizontally && currentTime - lastJumpTime > 500) {
+                            // Enhanced auto-jump logic:
+                            // 1. Jump if collided horizontally
+                            // 2. Jump if next waypoint is higher than current position
+                            val needsJump = player.onGround && currentTime - lastJumpTime > 500 && (
+                                player.isCollidedHorizontally ||
+                                (diffY > 0.2 && horizontalDistance < 2.0)
+                            )
+                            if (needsJump) {
                                 player.jump()
                                 lastJumpTime = currentTime
                             }
                         }
                         ActionType.BRIDGE -> {
-                            // Activate bridge mode when entering a BRIDGE node (if not already active)
-                            if (!bridgeModeActive) {
+                            // Prevent bridging when going DOWNWARD
+                            val isGoingDown = diffY < -0.5
+                            
+                            if (isGoingDown) {
+                                // Skip bridge mode; treat as normal walk/fall
+                                if (debugMode) ChatUtils.info("§e[Pathfinder] §7Descending - skipping bridge")
+                            } else if (!bridgeModeActive) {
+                                // Activate bridge mode when entering a BRIDGE node (if not already active)
                                 // Switch to blocks if not already holding them
                                 if (!EagleBridge.switchToBlocks()) {
                                     if (debugMode) ChatUtils.error("§c[Pathfinder] No blocks in hotbar!")
@@ -986,6 +1283,43 @@ object AdvancedPathfinder {
                             
                             // Stay in bridge mode - don't deactivate until we leave the BRIDGE nodes
                             // The deactivation happens in the waypoint reached check above
+                        }
+                        ActionType.PILLAR_UP -> {
+                            // Pillaring up - place blocks beneath player and jump
+                            if (player.onGround) {
+                                val blockBelow = BlockPos(player.posX, player.posY - 1, player.posZ)
+                                val blockAtFeet = BlockPos(player.posX, player.posY, player.posZ)
+                                
+                                // Check if we need to place a block
+                                if (world.getBlockState(blockBelow).block.material == Material.air ||
+                                    world.getBlockState(blockAtFeet).block.material == Material.air) {
+                                    
+                                    if (EagleBridge.switchToBlocks()) {
+                                        // Look down to place block
+                                        val originalPitch = player.rotationPitch
+                                        player.rotationPitch = 90f
+                                        Thread.sleep(30)
+                                        
+                                        // Place block
+                                        player.swingItem()
+                                        Mouse.rClick()
+                                        Thread.sleep(50)
+                                        
+                                        // Restore pitch
+                                        player.rotationPitch = originalPitch
+                                    }
+                                }
+                                
+                                // Jump up
+                                if (currentTime - lastJumpTime > 300) {
+                                    player.jump()
+                                    lastJumpTime = currentTime
+                                }
+                            }
+                        }
+                        ActionType.DROP_DOWN -> {
+                            // Just walk forward and fall - gravity handles it
+                            // Same as FALL action
                         }
                     }
 
