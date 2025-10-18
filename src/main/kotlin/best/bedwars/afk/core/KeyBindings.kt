@@ -8,6 +8,7 @@ object KeyBindings {
     
     lateinit var toggleBotKeyBinding: KeyBinding
     lateinit var testBridgingKeyBinding: KeyBinding
+    lateinit var generatorDetectorKeyBinding: KeyBinding
     
     fun register() {
         toggleBotKeyBinding = KeyBinding(
@@ -22,8 +23,15 @@ object KeyBindings {
             "Bedwars Bot"
         )
         
+        generatorDetectorKeyBinding = KeyBinding(
+            "Toggle Generator Detector",
+            Keyboard.KEY_H,
+            "Bedwars Bot"
+        )
+        
         ClientRegistry.registerKeyBinding(toggleBotKeyBinding)
         ClientRegistry.registerKeyBinding(testBridgingKeyBinding)
+        ClientRegistry.registerKeyBinding(generatorDetectorKeyBinding)
     }
 }
 

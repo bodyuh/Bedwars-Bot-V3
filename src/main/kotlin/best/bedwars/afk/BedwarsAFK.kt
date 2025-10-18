@@ -62,6 +62,10 @@ class BedwarsAFK {
         MinecraftForge.EVENT_BUS.register(best.bedwars.afk.events.KeybindHandler)
         MinecraftForge.EVENT_BUS.register(best.bedwars.afk.bot.pathfinding.BridgingPathfinder)
         MinecraftForge.EVENT_BUS.register(best.bedwars.afk.bot.pathfinding.EagleBridge)
+        MinecraftForge.EVENT_BUS.register(best.bedwars.afk.bot.detector.GeneratorDetector)
+        
+        // Register client-side commands
+        CommandHandler.registerCommands()
         
         println("$NAME initialized successfully!")
     }

@@ -1,5 +1,6 @@
 package best.bedwars.afk.events
 
+import best.bedwars.afk.bot.detector.GeneratorDetector
 import best.bedwars.afk.bot.pathfinding.BridgingPathfinder
 import best.bedwars.afk.core.KeyBindings
 import best.bedwars.afk.utils.ChatUtils
@@ -18,6 +19,12 @@ object KeybindHandler {
         // Test bridging keybind (B key)
         if (KeyBindings.testBridgingKeyBinding.isPressed) {
             handleTestBridging()
+        }
+        
+        // Generator detector keybind (H key)
+        if (KeyBindings.generatorDetectorKeyBinding.isPressed) {
+            ChatUtils.info("§e[DEBUG] H key pressed, toggling generator detector...")
+            GeneratorDetector.toggle()
         }
     }
     
