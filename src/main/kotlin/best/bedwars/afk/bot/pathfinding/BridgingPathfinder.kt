@@ -519,7 +519,18 @@ object BridgingPathfinder {
                         lastSpeedbridgeToggle = System.currentTimeMillis()
                         ChatUtils.info("§6[Speedbridge] §7Sneak (${timeSinceToggle}ms unsneak)")
                     }
+                    speedbridgeCycle == 0 -> {
+                        // Maintain sneak phase
+                        Movement.startSneaking()
+                    }
+                    speedbridgeCycle == 1 -> {
+                        // Maintain unsneak phase
+                        Movement.stopSneaking()
+                    }
                 }
+            } else if (!enableSpeedBridging || !useSpeedbridge) {
+                // Always sneak if speedbridge is disabled
+                Movement.startSneaking()
             }
             
             // Check if we're still on solid ground (safety check)

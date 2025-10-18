@@ -66,14 +66,32 @@ object AdvancedPathfinder {
     private var bridgeSafetyNodesRemaining = 0 // Counter for +2 safety nodes after bridge section
     
     // Speedbridge tracking (for straight bridges only)
-    private var speedbridgeCycle = 0 // 0 = sneak, 1 = sprint
+    private var speedbridgeCycle = 0 // 0 = sneak, 1 = unsneak
     private var lastSpeedbridgeToggle = 0L
+    private var lastBlockCount = 0 // Track block count to detect placements
+    private var blocksPlacedCount = 0 // Count successful block placements
+    private var canSpeedbridge = false // Only true after first successful block placement
     
     // Configurable pathfinding parameters
     var pathRecomputeTimeoutSeconds = 2.0 // Time before recomputing path if waypoint not reached
     var denseVerticalWaypoints = true // Add intermediate nodes when climbing
     var sprintJumpMinDistance = 3 // Minimum horizontal distance to allow sprint jumping on Y changes
     var enableSpeedBridging = true // Safe speedbridge on straight bridges
+    
+    /**
+     * Count blocks in hotbar to detect placements
+     */
+    private fun countBlocksInHotbar(): Int {
+        val player = BedwarsAFK.mc.thePlayer ?: return 0
+        var count = 0
+        for (i in 0..8) {
+            val stack = player.inventory.getStackInSlot(i)
+            if (stack != null && stack.item is net.minecraft.item.ItemBlock) {
+                count += stack.stackSize
+            }
+        }
+        return count
+    }
 
     fun goTo(x: Int, y: Int, z: Int, onComplete: () -> Unit) {
         val player = BedwarsAFK.mc.thePlayer ?: return
@@ -1155,29 +1173,54 @@ object AdvancedPathfinder {
                         val absDiffZ = abs(diffZ)
                         val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5
                         
+                        // Check for block placement by monitoring hotbar block count
+                        val currentBlockCount = countBlocksInHotbar()
+                        if (currentBlockCount < lastBlockCount && lastBlockCount > 0) {
+                            // Block was placed!
+                            blocksPlacedCount++
+                            canSpeedbridge = true // Enable speedbridge after first successful placement
+                            ChatUtils.info("§6[Bridge] §7Block placed! Total: ${blocksPlacedCount} (${currentBlockCount} blocks left)")
+                            lastBlockCount = currentBlockCount
+                            // Reset speedbridge cycle to start fresh after placement
+                            speedbridgeCycle = 0
+                            lastSpeedbridgeToggle = currentTime
+                        } else if (lastBlockCount == 0) {
+                            // First tick, just update the count
+                            lastBlockCount = currentBlockCount
+                        }
+                        
                         // SAFE SPEEDBRIDGE (straight bridges only)
-                        // Alternates between sneaking (safe) and unsneaking (faster)
-                        if (enableSpeedBridging && !isDiagonalBridge && player.onGround) {
+                        // Only activate after first successful block placement
+                        // Quick unsneak after block placement, then sneak again
+                        if (enableSpeedBridging && !isDiagonalBridge && player.onGround && canSpeedbridge) {
                             val timeSinceToggle = currentTime - lastSpeedbridgeToggle
                             
                             when {
-                                speedbridgeCycle == 0 && timeSinceToggle > 400 -> {
-                                    // Switch to unsneak phase (faster movement)
+                                speedbridgeCycle == 0 && timeSinceToggle > 300 -> {
+                                    // Quick unsneak after placing block (150ms)
                                     Movement.stopSneaking()
                                     speedbridgeCycle = 1
                                     lastSpeedbridgeToggle = currentTime
-                                    if (debugMode) ChatUtils.info("§6[Speedbridge] §eUnsneak")
+                                    if (debugMode) ChatUtils.info("§6[Speedbridge] §eUnsneak (${blocksPlacedCount} blocks)")
                                 }
-                                speedbridgeCycle == 1 && timeSinceToggle > 150 -> {
-                                    // Back to sneak phase (safe)
+                                speedbridgeCycle == 1 && timeSinceToggle > 75 -> {
+                                    // Back to sneak phase quickly (safe)
                                     Movement.startSneaking()
                                     speedbridgeCycle = 0
                                     lastSpeedbridgeToggle = currentTime
-                                    if (debugMode) ChatUtils.info("§6[Speedbridge] §7Sneak")
+                                    if (debugMode) ChatUtils.info("§6[Speedbridge] §7Sneak (${blocksPlacedCount} blocks)")
+                                }
+                                speedbridgeCycle == 0 -> {
+                                    // Maintain sneak phase
+                                    Movement.startSneaking()
+                                }
+                                speedbridgeCycle == 1 -> {
+                                    // Maintain unsneak phase
+                                    Movement.stopSneaking()
                                 }
                             }
                         } else {
-                            // No speedbridge on diagonal or if disabled - always sneak
+                            // No speedbridge on diagonal, if disabled, or before first placement - always sneak
                             Movement.startSneaking()
                         }
                     } else {
@@ -1278,7 +1321,12 @@ object AdvancedPathfinder {
                                 // Activate eagle bridging and STAY IN IT for entire bridge section
                                 EagleBridge.startBridging()
                                 bridgeModeActive = true
-                                if (debugMode) ChatUtils.info("§6[Pathfinder] §7Started eagle bridge section")
+                                speedbridgeCycle = 0 // Start in sneak phase
+                                lastSpeedbridgeToggle = System.currentTimeMillis()
+                                lastBlockCount = countBlocksInHotbar() // Initialize block count
+                                blocksPlacedCount = 0 // Reset placement counter
+                                canSpeedbridge = false // Disable until first block placed
+                                if (debugMode) ChatUtils.info("§6[Pathfinder] §7Started eagle bridge section (${lastBlockCount} blocks)")
                             }
                             
                             // Stay in bridge mode - don't deactivate until we leave the BRIDGE nodes

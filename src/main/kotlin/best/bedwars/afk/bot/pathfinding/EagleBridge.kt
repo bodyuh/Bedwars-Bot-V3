@@ -147,9 +147,9 @@ object EagleBridge {
         val world = BedwarsAFK.mc.theWorld ?: return
         val currentTime = System.currentTimeMillis()
         
-        // SIMPLE SNEAKING: Just sneak constantly when bridging over void
-        // This is much safer than the Myau delay system which causes shift spam
-        Movement.startSneak()
+        // NOTE: Sneaking is now handled by AdvancedPathfinder's speedbridge logic
+        // We don't call Movement.startSneak() here to allow speedbridge to work
+        // The pathfinder will handle sneak/unsneak cycling for straight bridges
         
         // Try to place block every ~300ms (slightly slower for more stability)
         if (currentTime - lastPlaceTime >= 300) {
