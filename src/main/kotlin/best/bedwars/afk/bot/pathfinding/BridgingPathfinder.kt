@@ -88,7 +88,7 @@ object BridgingPathfinder {
         }
         
         targetBlock = diamondGenPos
-        startingPosition = player.position // Save where we started
+        startingPosition = BlockPos(player.posX, player.posY, player.posZ) // Save where we started
         val distance = player.getDistance(diamondGenPos.x.toDouble(), diamondGenPos.y.toDouble(), diamondGenPos.z.toDouble())
         
         ChatUtils.info("${EnumChatFormatting.GREEN}✓ Found Diamond Generator at ${diamondGenPos.x}, ${diamondGenPos.y}, ${diamondGenPos.z}")
@@ -131,10 +131,11 @@ object BridgingPathfinder {
     private fun startBridgingSequence(targetPos: BlockPos, onComplete: () -> Unit) {
         val player = BedwarsAFK.mc.thePlayer ?: return
         
-        ChatUtils.info("${EnumChatFormatting.GRAY}Starting position: ${player.position.x}, ${player.position.y}, ${player.position.z}")
+        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
+        ChatUtils.info("${EnumChatFormatting.GRAY}Starting position: ${playerPos.x}, ${playerPos.y}, ${playerPos.z}")
         
         // Calculate path with bridging
-        val path = calculateBridgingPath(player.position, targetPos)
+        val path = calculateBridgingPath(playerPos, targetPos)
         
         if (path.isEmpty()) {
             ChatUtils.error("Could not calculate path!")
@@ -182,7 +183,8 @@ object BridgingPathfinder {
         ChatUtils.info("${EnumChatFormatting.YELLOW}Searching for ${blockType.localizedName}...")
         
         // Find nearest block of the specified type
-        val nearestBlock = findNearestBlock(blockType, player.position, 200)
+        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
+        val nearestBlock = findNearestBlock(blockType, playerPos, 200)
         
         if (nearestBlock == null) {
             ChatUtils.error("No ${blockType.localizedName} found within 200 blocks!")
@@ -191,7 +193,7 @@ object BridgingPathfinder {
         }
         
         targetBlock = nearestBlock
-        startingPosition = player.position // Save where we started
+        startingPosition = playerPos // Save where we started
         val distance = player.getDistance(nearestBlock.x.toDouble(), nearestBlock.y.toDouble(), nearestBlock.z.toDouble())
         
         ChatUtils.info("${EnumChatFormatting.GREEN}✓ Found ${blockType.localizedName} at ${nearestBlock.x}, ${nearestBlock.y}, ${nearestBlock.z}")
@@ -369,7 +371,8 @@ object BridgingPathfinder {
         ChatUtils.info("${EnumChatFormatting.GRAY}[${currentWaypointIndex + 1}/${currentPath.size}] Distance: ${String.format("%.1f", distance)}")
         
         // Check if we need to bridge
-        val needsBridge = needsBridging(player.position, waypoint, world)
+        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
+        val needsBridge = needsBridging(playerPos, waypoint, world)
         
         if (needsBridge) {
             ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Gap detected! Bridging...")
@@ -534,7 +537,7 @@ object BridgingPathfinder {
             }
             
             // Check if we're still on solid ground (safety check)
-            val blockBelow = w.getBlockState(p.position.down()).block
+            val blockBelow = w.getBlockState(BlockPos(p.posX, p.posY - 1, p.posZ)).block
             if (blockBelow.material == Material.air) {
                 // CRITICAL: We're in the air! Force sneak immediately and place block
                 if (enableSpeedBridging && useSpeedbridge && !p.isSneaking) {
@@ -741,7 +744,7 @@ object BridgingPathfinder {
             ChatUtils.info("${EnumChatFormatting.GREEN}✓ Standing on diamond block!")
             
             // Save this position as the diamond generator
-            savedGeneratorPos = player.position
+            savedGeneratorPos = BlockPos(player.posX, player.posY, player.posZ)
             ChatUtils.info("${EnumChatFormatting.GOLD}⭐ Diamond generator saved at ${savedGeneratorPos?.x}, ${savedGeneratorPos?.y}, ${savedGeneratorPos?.z}")
             
             // Wait a moment, then return home

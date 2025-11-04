@@ -2,7 +2,6 @@ package best.bedwars.afk.bot
 
 import best.bedwars.afk.BedwarsAFK
 import best.bedwars.afk.bot.player.Inventory
-import net.minecraft.client.gui.ScaledResolution
 import net.minecraft.util.EnumChatFormatting
 import net.minecraftforge.client.event.RenderGameOverlayEvent
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent
@@ -377,7 +376,6 @@ object ResourceTracker {
         // Update resources
         update()
         
-        val sr = ScaledResolution(mc)
         val fontRenderer = mc.fontRendererObj
         
         var y = 5

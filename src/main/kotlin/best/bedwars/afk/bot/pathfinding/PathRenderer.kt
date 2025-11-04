@@ -2,8 +2,6 @@ package best.bedwars.afk.bot.pathfinding
 
 import best.bedwars.afk.BedwarsAFK
 import net.minecraft.client.renderer.GlStateManager
-import net.minecraft.client.renderer.Tessellator
-import net.minecraft.client.renderer.vertex.DefaultVertexFormats
 import net.minecraft.util.AxisAlignedBB
 import net.minecraft.util.BlockPos
 import net.minecraftforge.client.event.RenderWorldLastEvent
@@ -55,9 +53,6 @@ object PathRenderer {
         // Translate to player position
         GlStateManager.translate(-playerX, -playerY, -playerZ)
         
-        val tessellator = Tessellator.getInstance()
-        val worldRenderer = tessellator.worldRenderer
-        
         // Draw path blocks
         for (i in currentWaypointIndex until path.size) {
             val pos = path[i]
@@ -76,11 +71,17 @@ object PathRenderer {
                 else -> floatArrayOf(1f, 1f, 0f, 0.25f) // Yellow (upcoming)
             }
             
-            drawBox(pos, r, g, b, a, worldRenderer)
+            drawBox(pos, r, g, b, a)
         }
         
         // Draw lines connecting waypoints
-        worldRenderer.begin(GL11.GL_LINE_STRIP, DefaultVertexFormats.POSITION_COLOR)
+        GlStateManager.disableTexture2D()
+        GlStateManager.disableLighting()
+        GlStateManager.enableBlend()
+        GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0)
+        GL11.glLineWidth(2.0f)
+        GL11.glBegin(GL11.GL_LINE_STRIP)
+        
         for (i in currentWaypointIndex until path.size) {
             val pos = path[i]
             val (r, g, b, a) = if (i < currentWaypointIndex) {
@@ -89,15 +90,16 @@ object PathRenderer {
                 floatArrayOf(1f, 1f, 0f, 0.8f) // Yellow
             }
             
-            worldRenderer.pos(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
-                .color(r, g, b, a).endVertex()
+                GL11.glColor4f(r, g, b, a)
+            GL11.glVertex3d(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5)
         }
-        tessellator.draw()
+        
+        GL11.glEnd()
         
         // Draw goal marker (large box at destination)
         if (path.isNotEmpty()) {
             val goal = path.last()
-            drawLargeBox(goal, 0f, 1f, 0f, 0.3f, worldRenderer) // Green goal
+            drawLargeBox(goal, 0f, 1f, 0f, 0.3f) // Green goal
         }
         
         GlStateManager.enableTexture2D()
@@ -106,101 +108,121 @@ object PathRenderer {
         GlStateManager.popMatrix()
     }
     
-    private fun drawBox(pos: BlockPos, r: Float, g: Float, b: Float, a: Float, worldRenderer: net.minecraft.client.renderer.WorldRenderer) {
+    private fun drawBox(pos: BlockPos, r: Float, g: Float, b: Float, a: Float) {
         val box = AxisAlignedBB(
             pos.x.toDouble(), pos.y.toDouble(), pos.z.toDouble(),
             pos.x + 1.0, pos.y + 1.0, pos.z + 1.0
         )
         
-        drawFilledBox(box, r, g, b, a, worldRenderer)
-        drawOutlinedBox(box, r, g, b, 1f, worldRenderer)
+        drawFilledBox(box, r, g, b, a)
+        drawOutlinedBox(box, r, g, b, 1f)
     }
     
-    private fun drawLargeBox(pos: BlockPos, r: Float, g: Float, b: Float, a: Float, worldRenderer: net.minecraft.client.renderer.WorldRenderer) {
+    private fun drawLargeBox(pos: BlockPos, r: Float, g: Float, b: Float, a: Float) {
         val box = AxisAlignedBB(
             pos.x - 0.2, pos.y.toDouble(), pos.z - 0.2,
             pos.x + 1.2, pos.y + 1.5, pos.z + 1.2
         )
         
-        drawFilledBox(box, r, g, b, a, worldRenderer)
-        drawOutlinedBox(box, r, g, b, 1f, worldRenderer)
+        drawFilledBox(box, r, g, b, a)
+        drawOutlinedBox(box, r, g, b, 1f)
     }
     
-    private fun drawFilledBox(box: AxisAlignedBB, r: Float, g: Float, b: Float, a: Float, worldRenderer: net.minecraft.client.renderer.WorldRenderer) {
-        val tessellator = Tessellator.getInstance()
-        worldRenderer.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR)
+    private fun drawFilledBox(box: AxisAlignedBB, r: Float, g: Float, b: Float, a: Float) {
+        // Draw filled box using GL_QUADS
+        GlStateManager.disableTexture2D()
+        GlStateManager.disableLighting()
+        GlStateManager.enableBlend()
+        GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0)
+        GL11.glColor4f(r, g, b, a)
         
-        // Bottom
-        worldRenderer.pos(box.minX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
+        // Bottom face
+        GL11.glBegin(GL11.GL_QUADS)
+        GL11.glVertex3d(box.minX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)        // Top face
+        GL11.glVertex3d(box.minX, box.maxY, box.minZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.minZ)
         
-        // Top
-        worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
+        // Front face
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
         
-        // Sides
-        worldRenderer.pos(box.minX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.minY, box.minZ).color(r, g, b, a).endVertex()
+        // Back face
+        GL11.glVertex3d(box.minX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.minZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.minZ)
         
-        worldRenderer.pos(box.maxX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
+        // Left face
+        GL11.glVertex3d(box.minX, box.minY, box.minZ)
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.minZ)
         
-        worldRenderer.pos(box.maxX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
+        // Right face
+        GL11.glVertex3d(box.maxX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
         
-        worldRenderer.pos(box.minX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        
-        tessellator.draw()
+        GL11.glEnd()
     }
     
-    private fun drawOutlinedBox(box: AxisAlignedBB, r: Float, g: Float, b: Float, a: Float, worldRenderer: net.minecraft.client.renderer.WorldRenderer) {
-        val tessellator = Tessellator.getInstance()
-        worldRenderer.begin(GL11.GL_LINE_STRIP, DefaultVertexFormats.POSITION_COLOR)
+    private fun drawOutlinedBox(box: AxisAlignedBB, r: Float, g: Float, b: Float, a: Float) {
+        // Draw lines
+        GL11.glDisable(GL11.GL_TEXTURE_2D)
+        GL11.glLineWidth(2.0f)
+        GL11.glEnable(GL11.GL_BLEND)
+        GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA)
+        GL11.glColor4f(r, g, b, a)
+        GL11.glBegin(GL11.GL_LINES)
         
         // Bottom square
-        worldRenderer.pos(box.minX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.minY, box.minZ).color(r, g, b, a).endVertex()
+        GL11.glVertex3d(box.minX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.minZ)
+        
+        GL11.glVertex3d(box.maxX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
+        
+        GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)
+        
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.minY, box.minZ)
         
         // Top square
-        worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
+        GL11.glVertex3d(box.minX, box.maxY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.minZ)
         
-        tessellator.draw()
+        GL11.glVertex3d(box.maxX, box.maxY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)
+        
+        GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
+        
+        GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.minZ)
         
         // Vertical lines
-        worldRenderer.begin(GL11.GL_LINES, DefaultVertexFormats.POSITION_COLOR)
-        worldRenderer.pos(box.minX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
+        GL11.glVertex3d(box.minX, box.minY, box.minZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.minZ)
         
-        worldRenderer.pos(box.maxX, box.minY, box.minZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
+        GL11.glVertex3d(box.maxX, box.minY, box.minZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.minZ)
         
-        worldRenderer.pos(box.maxX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
+        GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)
         
-        worldRenderer.pos(box.minX, box.minY, box.maxZ).color(r, g, b, a).endVertex()
-        worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)
+        GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
         
-        tessellator.draw()
+        GL11.glEnd()
     }
 }
 

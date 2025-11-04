@@ -20,7 +20,7 @@ loom {
 
     launchConfigs {
         getByName("client") {
-            arg("--tweakClass", "gg.essential.loader.stage0.EssentialSetupTweaker")
+            // Essential Loader removed - not compatible with Forge 1.8.9
         }
     }
 
@@ -37,8 +37,12 @@ dependencies {
     mappings("de.oceanlabs.mcp:mcp_stable:22-1.8.9")
     forge("net.minecraftforge:forge:1.8.9-11.15.1.2318-1.8.9")
 
-    compileOnly("gg.essential:essential-1.8.9-forge:4955+g395141645")
-    embed("gg.essential:loader-launchwrapper:1.1.3")
+    // Essential removed - not used in code and incompatible with runtime
+    // compileOnly("gg.essential:essential-1.8.9-forge:4955+g395141645")
+    // embed("gg.essential:loader-launchwrapper:1.1.3")
+
+    // Kotlin standard library - required for Kotlin mods to run
+    embed("org.jetbrains.kotlin:kotlin-stdlib:1.7.10")
 
     compileOnly("org.spongepowered:mixin:0.8.5-SNAPSHOT")
     annotationProcessor("org.spongepowered:mixin:0.8.5-SNAPSHOT:processor")
@@ -59,10 +63,10 @@ tasks {
     jar {
         from(embed.files.map { zipTree(it) })
 
+        // Essential Loader tweak class removed - not compatible with runtime
         manifest.attributes(
             mapOf(
-                "ModSide" to "CLIENT",
-                "TweakClass" to "gg.essential.loader.stage0.EssentialSetupTweaker"
+                "ModSide" to "CLIENT"
             )
         )
     }

@@ -545,7 +545,7 @@ object BedDefender {
         val standPos = findSafeStandingPosition(targetPos, player)
         
         if (standPos != null) {
-            val playerPos = player.position
+            val playerPos = BlockPos(player.posX, player.posY, player.posZ)
             val distanceToStand = playerPos.distanceSq(standPos)
             
             if (distanceToStand > 4.0) { // More than 2 blocks away from standing position
@@ -954,7 +954,8 @@ object BedDefender {
             ChatUtils.info("${EnumChatFormatting.RED}Block collision detected! Moving to better position...")
             // Find a non-colliding position
             val safePos = findNonCollidingPosition(targetPos, player, world)
-            if (safePos != null && safePos != player.position) {
+            val playerPos = BlockPos(player.posX, player.posY, player.posZ)
+            if (safePos != null && safePos != playerPos) {
                 ChatUtils.info("${EnumChatFormatting.GRAY}Moving to safe position...")
                 moveToPositionDirectly(safePos, targetPos, onComplete)
                 return

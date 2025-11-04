@@ -2,8 +2,6 @@ package best.bedwars.afk.events
 
 import best.bedwars.afk.bot.commands.PathfindingCommands
 import net.minecraftforge.client.ClientCommandHandler
-import net.minecraftforge.fml.common.eventhandler.SubscribeEvent
-import net.minecraftforge.fml.common.gameevent.InputEvent.KeyInputEvent
 
 /**
  * Handles client-side commands that don't send to chat
@@ -18,6 +16,8 @@ import net.minecraftforge.fml.common.gameevent.InputEvent.KeyInputEvent
  * /bridge start
  * /bridge stop
  * /test
+ * 
+ * NOTE: Use / (slash) not # (hash) - Minecraft's command system uses /
  */
 object CommandHandler {
     

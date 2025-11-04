@@ -100,7 +100,7 @@ object LocationManager {
         val player = BedwarsAFK.mc.thePlayer ?: return false
         val world = BedwarsAFK.mc.theWorld ?: return false
         
-        val playerPos = player.position
+        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
         var nearestBed: BlockPos? = null
         var nearestDistance = Double.MAX_VALUE
         
@@ -138,7 +138,7 @@ object LocationManager {
         val player = BedwarsAFK.mc.thePlayer ?: return false
         val world = BedwarsAFK.mc.theWorld ?: return false
         
-        val playerPos = player.position
+        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
         var nearestChest: BlockPos? = null
         var nearestDistance = Double.MAX_VALUE
         
@@ -177,7 +177,7 @@ object LocationManager {
         val player = BedwarsAFK.mc.thePlayer ?: return false
         val world = BedwarsAFK.mc.theWorld ?: return false
         
-        val playerPos = player.position
+        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
         var nearestEnderChest: BlockPos? = null
         var nearestDistance = Double.MAX_VALUE
         
@@ -330,7 +330,7 @@ object LocationManager {
             Mouse.stopTracking()
             
             // Update generator position to current location
-            generatorPos = player.position
+            generatorPos = BlockPos(player.posX, player.posY, player.posZ)
             
             isNavigating = false
             currentDestination = ""
@@ -405,7 +405,7 @@ object LocationManager {
                     Mouse.stopTracking()
                     
                     // Save exact position
-                    generatorPos = p.position
+                    generatorPos = BlockPos(p.posX, p.posY, p.posZ)
                     ChatUtils.info("${EnumChatFormatting.GREEN}✓ Aligned! Position saved: ${p.posX.toInt()}, ${p.posY.toInt()}, ${p.posZ.toInt()}")
                     
                     isNavigating = false
@@ -432,7 +432,7 @@ object LocationManager {
                         
                         if (finalIron > initialIron || finalGold > initialGold) {
                             // Got resources!
-                            generatorPos = p.position
+                            generatorPos = BlockPos(p.posX, p.posY, p.posZ)
                             ChatUtils.info("${EnumChatFormatting.GREEN}✓ Position locked!")
                         } else if (retryCount < 4) {
                             // Retry
@@ -519,7 +519,7 @@ object LocationManager {
                     Mouse.stopTracking()
                     
                     // Update generator position to current location
-                    val newGenPos = player.position
+                    val newGenPos = BlockPos(player.posX, player.posY, player.posZ)
                     generatorPos = newGenPos
                     ChatUtils.info("${EnumChatFormatting.GREEN}✓ Generator position updated!")
                     
