@@ -141,7 +141,9 @@ object PathRenderer {
         GL11.glVertex3d(box.minX, box.minY, box.minZ)
         GL11.glVertex3d(box.maxX, box.minY, box.minZ)
         GL11.glVertex3d(box.maxX, box.minY, box.maxZ)
-        GL11.glVertex3d(box.minX, box.minY, box.maxZ)        // Top face
+        GL11.glVertex3d(box.minX, box.minY, box.maxZ)
+        
+        // Top face
         GL11.glVertex3d(box.minX, box.maxY, box.minZ)
         GL11.glVertex3d(box.minX, box.maxY, box.maxZ)
         GL11.glVertex3d(box.maxX, box.maxY, box.maxZ)

@@ -28,7 +28,7 @@ object TimeUtils {
     /**
      * Call a function every interval ms after delay ms
      */
-    fun setInterval(function: () -> Unit, delay: Int, interval: Int): Timer? {
+    fun setInterval(function: TimerTask.() -> Unit, delay: Int, interval: Int): Timer? {
         try {
             val timer = Timer()
             timer.schedule(

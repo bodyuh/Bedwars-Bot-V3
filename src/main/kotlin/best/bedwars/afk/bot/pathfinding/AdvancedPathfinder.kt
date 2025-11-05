@@ -1318,6 +1318,11 @@ object AdvancedPathfinder {
                                     return
                                 }
                                 
+                                // Move back slightly from the edge before starting to bridge
+                                Movement.startBackward()
+                                Thread.sleep(100) // Small delay to ensure we're positioned correctly
+                                Movement.stopBackward()
+                                
                                 // Activate eagle bridging and STAY IN IT for entire bridge section
                                 EagleBridge.startBridging()
                                 bridgeModeActive = true

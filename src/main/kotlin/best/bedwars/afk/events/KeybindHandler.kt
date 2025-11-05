@@ -32,7 +32,7 @@ object KeybindHandler {
      * Handle test bridging command
      */
     private fun handleTestBridging() {
-        if (BridgingPathfinder.isActive()) {
+        if (BridgingPathfinder.isActive) {
             ChatUtils.info("${EnumChatFormatting.YELLOW}Stopping bridging test...")
             BridgingPathfinder.stop()
         } else {

@@ -30,7 +30,7 @@ import kotlin.math.sqrt
  */
 object BridgingPathfinder {
     
-    private var isActive = false
+    var isActive = false
     private var currentPath = mutableListOf<BlockPos>()
     private var currentWaypointIndex = 0
     private var targetBlock: BlockPos? = null
@@ -40,6 +40,10 @@ object BridgingPathfinder {
     // Placement spam control - increased cooldown to reduce packets
     private var lastPlacementPos: BlockPos? = null
     private var lastPlacementAtMs: Long = 0L
+    
+    // Preparation phase tracking
+    private var preparationPhase = false
+    private var preparationStartTime = 0L
     
     // Bridging configuration
     var enableDiagonalBridging = true // Allow diagonal (faster but less common)
@@ -113,15 +117,18 @@ object BridgingPathfinder {
             // Go to bed area first
             best.bedwars.afk.bot.LocationManager.goToBed {
                 ChatUtils.info("${EnumChatFormatting.GREEN}✓ Reached outside position!")
+                // Wait 2 seconds to ensure we're properly positioned
                 TimeUtils.setTimeout({
                     // Now start bridging from here
                     startBridgingSequence(targetPos, onComplete)
-                }, 1000)
+                }, 2000)
             }
         } else {
             // No bed detected, start from current position
-            ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Bed not detected, bridging from current position...")
-            startBridgingSequence(targetPos, onComplete)
+            ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Bed not detected, preparing to bridge...")
+            TimeUtils.setTimeout({
+                startBridgingSequence(targetPos, onComplete)
+            }, 1500) // Wait 1.5s to prepare
         }
     }
     
@@ -145,6 +152,9 @@ object BridgingPathfinder {
         
         currentPath = path.toMutableList()
         currentWaypointIndex = 0
+        
+        // Update path renderer
+        updatePathRenderer()
         
         ChatUtils.info("${EnumChatFormatting.AQUA}Path calculated: ${path.size} waypoints")
         ChatUtils.info("${EnumChatFormatting.YELLOW}Starting bridging sequence...")
@@ -235,6 +245,28 @@ object BridgingPathfinder {
         return diamondGenPos
     }
     
+    /**
+     * Equip wool from inventory
+     */
+    private fun equipWool(): Boolean {
+        val player = BedwarsAFK.mc.thePlayer ?: return false
+        
+        for (i in 0..8) {
+            val stack = player.inventory.getStackInSlot(i)
+            if (stack != null) {
+                val itemName = stack.unlocalizedName.lowercase()
+                val displayName = stack.displayName.lowercase()
+                
+                if (itemName.contains("cloth") || itemName.contains("wool") || displayName.contains("wool")) {
+                    player.inventory.currentItem = i
+                    return true
+                }
+            }
+        }
+        
+        return false
+    }
+
     /**
      * Count colored wool in inventory
      */
@@ -340,9 +372,6 @@ object BridgingPathfinder {
         return path
     }
     
-    /**
-     * Follow the bridging path
-     */
     private fun followBridgingPath(onComplete: () -> Unit) {
         if (!isActive || currentWaypointIndex >= currentPath.size) {
             // Finished!
@@ -352,7 +381,7 @@ object BridgingPathfinder {
             PathRenderer.clearPath()
             
             ChatUtils.info("${EnumChatFormatting.GREEN}✓ Bridging complete!")
-            onComplete()
+            onComplete.invoke()
             return
         }
         
@@ -366,43 +395,69 @@ object BridgingPathfinder {
         }
         
         val waypoint = currentPath[currentWaypointIndex]
+        val playerBlock = BlockPos(player.posX, player.posY, player.posZ)
         val distance = player.getDistance(waypoint.x + 0.5, waypoint.y.toDouble(), waypoint.z + 0.5)
         
-        ChatUtils.info("${EnumChatFormatting.GRAY}[${currentWaypointIndex + 1}/${currentPath.size}] Distance: ${String.format("%.1f", distance)}")
-        
-        // Check if we need to bridge
-        val playerPos = BlockPos(player.posX, player.posY, player.posZ)
-        val needsBridge = needsBridging(playerPos, waypoint, world)
-        
-        if (needsBridge) {
-            ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Gap detected! Bridging...")
-            bridgeToWaypoint(waypoint) {
-                // After bridging, move to next waypoint
-                currentWaypointIndex++
-                followBridgingPath(onComplete)
-            }
-        } else {
-            // Normal pathfinding
-            AdvancedPathfinder.goTo(waypoint.x, waypoint.y, waypoint.z) {
-                currentWaypointIndex++
-                followBridgingPath(onComplete)
+        // Only update progress when we're actually on solid ground
+        val isOnSolidGround = world.getBlockState(playerBlock.down()).block.material.isSolid
+        if (isOnSolidGround) {
+            ChatUtils.info("${EnumChatFormatting.GRAY}[${currentWaypointIndex + 1}/${currentPath.size}] Distance: ${String.format("%.1f", distance)}")
+            
+            // Only check for next action when we're stable
+            val (needsBridging, prepPos) = checkNeedsBridging(playerBlock, waypoint, world)
+            
+            if (needsBridging) {
+                ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Gap detected! Moving to preparation position...")
+                
+                if (prepPos != null) {
+                    // First move to preparation position
+                    AdvancedPathfinder.goTo(prepPos.x, prepPos.y, prepPos.z) {
+                        ChatUtils.info("${EnumChatFormatting.GREEN}✓ Reached preparation position!")
+                        TimeUtils.setTimeout({
+                            bridgeToWaypoint(waypoint) {
+                                // After bridging, move to next waypoint
+                                currentWaypointIndex++
+                                followBridgingPath(onComplete)
+                            }
+                        }, 500) // Short pause at prep position
+                    }
+                } else {
+                    ChatUtils.error("No valid preparation position found!")
+                    currentWaypointIndex++
+                    followBridgingPath(onComplete)
+                }
+            } else {
+                // Normal pathfinding
+                AdvancedPathfinder.goTo(waypoint.x, waypoint.y, waypoint.z) {
+                    currentWaypointIndex++
+                    followBridgingPath(onComplete)
+                }
             }
         }
     }
     
     /**
-     * Check if we need to bridge between two positions
+     * Check if we need to bridge between two positions, returns the last solid block position
      */
-    private fun needsBridging(from: BlockPos, to: BlockPos, world: net.minecraft.world.World): Boolean {
+    private fun checkNeedsBridging(from: BlockPos, to: BlockPos, world: net.minecraft.world.World): Pair<Boolean, BlockPos?> {
+        // First check if we're currently on solid ground
+        val blockUnderStart = world.getBlockState(from.down()).block
+        if (!blockUnderStart.material.isSolid) {
+            return Pair(false, null) // Can't start bridging if we're not on solid ground
+        }
+
         // Check if there's a gap (no solid blocks) between positions
         val dx = to.x - from.x
         val dz = to.z - from.z
         val steps = sqrt((dx * dx + dz * dz).toDouble()).toInt()
         
-        if (steps == 0) return false
+        if (steps == 0) return Pair(false, null)
+        
+        var lastSolidPos: BlockPos = from
+        var gapFound = false
         
         // Check path for gaps
-        for (i in 1..steps) {
+        for (i in 0..steps) {
             val progress = i.toDouble() / steps
             val checkX = (from.x + dx * progress).toInt()
             val checkZ = (from.z + dz * progress).toInt()
@@ -411,13 +466,15 @@ object BridgingPathfinder {
             val checkPos = BlockPos(checkX, checkY - 1, checkZ)
             val blockBelow = world.getBlockState(checkPos).block
             
-            // If there's air below, we need to bridge
-            if (blockBelow.material == Material.air) {
-                return true
+            if (blockBelow.material.isSolid) {
+                lastSolidPos = BlockPos(checkX, checkY, checkZ)
+            } else {
+                gapFound = true
+                break // Found the gap, lastSolidPos is our preparation position
             }
         }
         
-        return false
+        return Pair(gapFound, if (gapFound) lastSolidPos else null)
     }
     
     /**
@@ -432,6 +489,14 @@ object BridgingPathfinder {
             return
         }
         
+        // Verify we're actually on a solid block before starting to bridge
+        val playerBlock = BlockPos(player.posX, player.posY, player.posZ)
+        if (!world.getBlockState(playerBlock.down()).block.material.isSolid) {
+            ChatUtils.error("Not on solid ground! Cannot start bridging.")
+            onComplete()
+            return
+        }
+        
         // Calculate direction to target
         val dx = target.x + 0.5 - player.posX
         val dz = target.z + 0.5 - player.posZ
@@ -442,25 +507,23 @@ object BridgingPathfinder {
         val absDz = abs(dz)
         val isDiagonal = absDx > 1.5 && absDz > 1.5 // Both X and Z movement significant
         
-        // Set yaw and pitch based on bridge type
-        if (isDiagonal) {
-            // DIAGONAL BRIDGE: Use fixed angles based on direction
-            // Since we move BACKWARDS (S key), we face OPPOSITE of movement direction
-            val diagonalYaw = when {
+        // Calculate initial position for bridging preparation
+        val bridgingYaw = if (isDiagonal) {
+            when {
                 dx > 0 && dz > 0 -> -45f   // Moving SE, face NW (opposite)
-                dx > 0 && dz < 0 -> 45f  // Moving NE, face SW (opposite)
-                dx < 0 && dz > 0 -> -135f    // Moving SW, face NE (opposite)
+                dx > 0 && dz < 0 -> 45f    // Moving NE, face SW (opposite)
+                dx < 0 && dz > 0 -> -135f  // Moving SW, face NE (opposite)
                 else -> 135f               // Moving NW, face SE (opposite)
             }
-            player.rotationYaw = diagonalYaw
-            player.rotationPitch = 77f
         } else {
-            // STRAIGHT BRIDGE: Face opposite direction
-            val bridgingYaw = targetYaw + 180f
-            player.rotationYaw = bridgingYaw
-            player.rotationPitch = 83f // Steeper for straight bridges
-            ChatUtils.info("§6[Bridge] §7Straight bridge at yaw=${bridgingYaw.toInt()}°, pitch=83°")
+            targetYaw + 180f // Face opposite direction for straight bridging
         }
+
+        // Set initial rotation for preparation
+        player.rotationYaw = bridgingYaw
+        player.rotationPitch = if (isDiagonal) 77f else 83f
+
+        ChatUtils.info("§6[Bridge] §7${if (isDiagonal) "Diagonal" else "Straight"} bridge at yaw=${bridgingYaw.toInt()}°, pitch=${player.rotationPitch}°")
         
         // Equip wool
         if (!equipWool()) {
@@ -468,152 +531,38 @@ object BridgingPathfinder {
             onComplete()
             return
         }
+
+        // Start preparation phase
+        ChatUtils.info("${EnumChatFormatting.AQUA}Starting bridge preparation...")
         
-        ChatUtils.info("${EnumChatFormatting.AQUA}Bridging with wool...")
+        // Calculate the block behind player based on yaw
+        val blockBehindPlayer = when {
+            bridgingYaw < -135 || bridgingYaw > 135 -> BlockPos(player.posX, player.posY, player.posZ + 1) // Facing north
+            bridgingYaw < -45 -> BlockPos(player.posX + 1, player.posY, player.posZ) // Facing west
+            bridgingYaw < 45 -> BlockPos(player.posX, player.posY, player.posZ - 1) // Facing south
+            bridgingYaw < 135 -> BlockPos(player.posX - 1, player.posY, player.posZ) // Facing east
+            else -> BlockPos(player.posX, player.posY, player.posZ + 1) // Facing north (wrap)
+        }
         
-        // Start bridging sequence - WALK BACKWARDS (hold S)
-        Movement.startBackward() // This is the key for human-like bridging!
-        Movement.startSneaking() // Sneak for safety initially
+        // Check if we have safe ground to start from
+        val isSafeToStart = world.getBlockState(blockBehindPlayer.down()).block.material.isSolid
+
+        // Start sneaking for preparation
+        Movement.startSneaking()
         
-        var bridgeTimer: Timer? = null
-        var checkCount = 0
-        var lastPlacementTime = System.currentTimeMillis()
-        var consecutiveFailures = 0
-        val maxChecks = 150 // 7.5 seconds max
-        
-        // Safe speedbridge variables (only for straight bridges)
-        var speedbridgeCycle = 0 // Counter for sneak/sprint alternation
-        var lastSpeedbridgeToggle = System.currentTimeMillis()
-        val useSpeedbridge = !isDiagonal // Only speedbridge on straight bridges
-        
-        bridgeTimer = TimeUtils.setInterval({
-            checkCount++
-            
-            val p = BedwarsAFK.mc.thePlayer
-            val w = BedwarsAFK.mc.theWorld
-            if (p == null || w == null) {
-                bridgeTimer?.cancel()
-                Movement.stopBackward()
-                Movement.stopSneaking()
-                onComplete()
-                return@setInterval
-            }
-            
-            // SAFE SPEEDBRIDGE MODE: Alternate between sneak and unsneak
-            // This is much safer than full speedbridging but faster than pure eagle
-            // ONLY on straight bridges (diagonal uses pure sneak for safety)
-            if (enableSpeedBridging && useSpeedbridge && p.onGround) {
-                val timeSinceToggle = System.currentTimeMillis() - lastSpeedbridgeToggle
-                
-                // Cycle: Sneak for 400ms, unsneak for 150ms, repeat
-                // This keeps the player mostly safe while gaining some speed
-                when {
-                    speedbridgeCycle == 0 && timeSinceToggle > 400 -> {
-                        // Switch to unsneak phase (faster movement)
-                        Movement.stopSneaking()
-                        speedbridgeCycle = 1
-                        lastSpeedbridgeToggle = System.currentTimeMillis()
-                        ChatUtils.info("§6[Speedbridge] §eUnsneak (${timeSinceToggle}ms sneak)")
-                    }
-                    speedbridgeCycle == 1 && timeSinceToggle > 150 -> {
-                        // Back to sneak phase (safe)
-                        Movement.startSneaking()
-                        speedbridgeCycle = 0
-                        lastSpeedbridgeToggle = System.currentTimeMillis()
-                        ChatUtils.info("§6[Speedbridge] §7Sneak (${timeSinceToggle}ms unsneak)")
-                    }
-                    speedbridgeCycle == 0 -> {
-                        // Maintain sneak phase
-                        Movement.startSneaking()
-                    }
-                    speedbridgeCycle == 1 -> {
-                        // Maintain unsneak phase
-                        Movement.stopSneaking()
-                    }
-                }
-            } else if (!enableSpeedBridging || !useSpeedbridge) {
-                // Always sneak if speedbridge is disabled
-                Movement.startSneaking()
-            }
-            
-            // Check if we're still on solid ground (safety check)
-            val blockBelow = w.getBlockState(BlockPos(p.posX, p.posY - 1, p.posZ)).block
-            if (blockBelow.material == Material.air) {
-                // CRITICAL: We're in the air! Force sneak immediately and place block
-                if (enableSpeedBridging && useSpeedbridge && !p.isSneaking) {
-                    Movement.startSneaking()
-                    speedbridgeCycle = 0 // Reset cycle
-                }
-                
-                // We're in the air! Try to place block immediately
-                val placed = placeBlockBehind(p, w)
-                if (!placed) {
-                    consecutiveFailures++
-                    
-                    // If we can't place blocks for 2 seconds (40 checks), we're stuck
-                    // Increased threshold since we have better fallback logic now
-                    if (consecutiveFailures > 40) {
-                        ChatUtils.error("Can't place blocks after 40 attempts! Stopping to prevent void fall")
-                        bridgeTimer?.cancel()
-                        Movement.stopBackward()
-                        Movement.stopSprinting()
-                        // Keep sneaking for safety!
-                        TimeUtils.setTimeout({
-                            Movement.stopSneaking()
-                            onComplete()
-                        }, 1000)
-                        return@setInterval
-                    }
-                } else {
-                    consecutiveFailures = 0
-                }
-            } else {
-                consecutiveFailures = 0
-            }
-            
-            // Try to place block with configurable cooldown (reduces packet spam)
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastPlacementTime >= placementCooldownMs) {
-                val placed = placeBlockBehind(p, w)
-                if (placed) {
-                    lastPlacementTime = currentTime
-                }
-            }
-            
-            // Check if we reached the waypoint
-            val dist = p.getDistance(target.x + 0.5, target.y.toDouble(), target.z + 0.5)
-            
-            // Tighter completion threshold to avoid stopping shy of the target
-            if (dist < 1.0 || checkCount >= maxChecks) {
-                bridgeTimer?.cancel()
-                
-                // CRITICAL: Stop ALL movement BEFORE unshifting to prevent void fall!
-                Movement.stopBackward()
-                Movement.stopSprinting() // Stop speedbridge sprint if active
-                
-                // Wait for movement to stop, THEN unshift
-                TimeUtils.setTimeout({
-                    Movement.stopSneaking()
-                    Mouse.stopTracking()
-                    
-                    if (dist < 1.0) {
-                        ChatUtils.info("${EnumChatFormatting.GREEN}✓ Bridge complete!")
-                    } else {
-                        ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Bridge timeout")
-                    }
-                    
-                    // Final nudge to stand on the destination block center if close
-                    if (dist < 1.0) {
-                        AdvancedPathfinder.goTo(target.x, target.y, target.z) {
-                            onComplete()
-                        }
-                    } else {
-                        TimeUtils.setTimeout({ onComplete() }, 200)
-                    }
-                }, 300) // Wait 300ms for movement to fully stop
-            }
-        }, 0, 50)
+        if (!isSafeToStart) {
+            ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Moving to safer starting position...")
+            Movement.startForward()
+            TimeUtils.setTimeout({
+                Movement.stopForward()
+                prepareBridging(player, target, isDiagonal, onComplete)
+            }, 250)
+        } else {
+            prepareBridging(player, target, isDiagonal, onComplete)
+        }
     }
+
+
     
     /**
      * Place a block behind the player for bridging
@@ -622,11 +571,34 @@ object BridgingPathfinder {
     private fun placeBlockBehind(player: net.minecraft.client.entity.EntityPlayerSP, world: net.minecraft.client.multiplayer.WorldClient): Boolean {
         // Calculate position directly under player (for sneaking backwards)
         // When walking backwards while looking down, we want to place right below us
+        val blockX = player.posX.toInt()
+        val blockZ = player.posZ.toInt()
+        val fracX = player.posX - blockX
+        val fracZ = player.posZ - blockZ
+        
+        // More lenient edge detection - allow placement earlier to ensure safety
+        // We're sneaking so we can't fall, and placing early is better than late
+        val yaw = (player.rotationYaw % 360 + 360) % 360 // Normalize to 0-360
+        val isNearEdge = when {
+            yaw > 315 || yaw <= 45 -> fracZ < 0.5  // Facing north (-Z)
+            yaw <= 135 -> fracX < 0.5              // Facing east (+X)
+            yaw <= 225 -> fracZ > 0.5              // Facing south (+Z)
+            yaw <= 315 -> fracX > 0.5              // Facing west (-X)
+            else -> fracZ < 0.5                     // Facing north (wrap)
+        }
+        
+        if (!isNearEdge && player.onGround) {
+            // Only enforce edge check when on ground (allow emergency placements in air)
+            return false
+        }
+        
         val placePos = BlockPos(player.posX, player.posY - 1.0, player.posZ)
         
         // Check if position already has a block
-        if (world.getBlockState(placePos).block.material != Material.air) {
-            return true // Block already exists, success
+        val blockAtPos = world.getBlockState(placePos).block
+        if (blockAtPos.material != Material.air) {
+            // Block exists, but only return success if it's actually solid
+            return blockAtPos.material.isSolid
         }
 
         // De-duplication: avoid spamming the same air position within cooldown window
@@ -648,27 +620,64 @@ object BridgingPathfinder {
             return false
         }
         
-        // HUMAN-LIKE PLACEMENT: Just simulate a right-click!
-        // The server will handle block placement based on:
-        // - Where the player is looking
-        // - What block they're targeting
-        // - If they're in range
+        val (placeOnPos, face) = placementInfo
         
-        // This is exactly how a real player places blocks - they just press right-click
-        // The Minecraft client/server handles the rest
+        // Calculate hit vector (center of the face we're placing against)
+        // In Minecraft 1.8.9, EnumFacing doesn't have directionVec, so we calculate it manually
+        val faceX = when (face) {
+            EnumFacing.EAST -> 1.0
+            EnumFacing.WEST -> -1.0
+            else -> 0.0
+        }
+        val faceY = when (face) {
+            EnumFacing.UP -> 1.0
+            EnumFacing.DOWN -> -1.0
+            else -> 0.0
+        }
+        val faceZ = when (face) {
+            EnumFacing.SOUTH -> 1.0
+            EnumFacing.NORTH -> -1.0
+            else -> 0.0
+        }
         
-        // Swing hand first (visual feedback)
-        player.swingItem()
+        val hitVec = Vec3(
+            placeOnPos.x + 0.5 + faceX * 0.5,
+            placeOnPos.y + 0.5 + faceY * 0.5,
+            placeOnPos.z + 0.5 + faceZ * 0.5
+        )
         
-        // Simulate right-click (50ms press)
-        Mouse.rClick()
-        lastPlacementPos = placePos
-        lastPlacementAtMs = now
+        // Rotate player to look at the placement surface for better accuracy
+        val rotations = best.bedwars.afk.utils.EntityUtils.getRotationsToCoords(
+            player,
+            hitVec.xCoord,
+            hitVec.yCoord,
+            hitVec.zCoord
+        )
         
-        // Small delay to let the server process
-        // We return true immediately to keep bridging smooth
-        // The server will place the block if valid
-        return true
+        if (rotations != null) {
+            player.rotationYaw = rotations[0]
+            player.rotationPitch = rotations[1]
+        }
+        
+        // Use the proper block placement API for Minecraft 1.8.9
+        val result = BedwarsAFK.mc.playerController.onPlayerRightClick(
+            player,
+            world,
+            heldItem,
+            placeOnPos,
+            face,
+            hitVec
+        )
+        
+        if (result) {
+            // Success! Block placement was sent to server
+            player.swingItem()
+            lastPlacementPos = placePos
+            lastPlacementAtMs = now
+            return true
+        }
+        
+        return false
     }
     
     /**
@@ -704,27 +713,143 @@ object BridgingPathfinder {
     }
     
     /**
-     * Equip wool from inventory
+     * Prepare bridging by looking down and waiting
      */
-    private fun equipWool(): Boolean {
-        val player = BedwarsAFK.mc.thePlayer ?: return false
+    private fun prepareBridging(player: net.minecraft.client.entity.EntityPlayerSP, target: BlockPos, isDiagonal: Boolean, onComplete: () -> Unit) {
+        // Initialize preparation phase
+        preparationPhase = true
+        preparationStartTime = System.currentTimeMillis()
+
+        // Set initial player orientation
+        // Look down a bit more for safety
+        player.rotationPitch = if (isDiagonal) 77f else 83f 
         
-        for (i in 0..8) {
-            val stack = player.inventory.getStackInSlot(i)
-            if (stack != null) {
-                val itemName = stack.unlocalizedName.lowercase()
-                val displayName = stack.displayName.lowercase()
+        ChatUtils.info("${EnumChatFormatting.AQUA}Preparing to bridge...")
+        Movement.startSneaking() // Ensure sneaking for preparation
+
+        // Start bridging after preparation phase
+        TimeUtils.setTimeout({
+            preparationPhase = false 
+            ChatUtils.info("${EnumChatFormatting.GREEN}✓ Bridge preparation complete")
+            startBridging(player, target, isDiagonal, onComplete)
+        }, 1500) // 1.5s preparation time
+    }
+
+    /**
+     * Start the actual bridging sequence
+     */
+    private fun startBridging(player: net.minecraft.client.entity.EntityPlayerSP, target: BlockPos, isDiagonal: Boolean, onComplete: () -> Unit) {
+        ChatUtils.info("${EnumChatFormatting.AQUA}Starting bridging sequence...")
+        Movement.startBackward()
+
+        var checkCount = 0
+        var lastPlacementTime = System.currentTimeMillis()
+        var consecutiveFailures = 0
+        val maxChecks = 150 // 7.5 seconds max
+
+        // Safe speedbridge variables (only for straight bridges)
+        var speedbridgeCycle = 0 // Counter for sneak/sprint alternation
+        var lastSpeedbridgeToggle = System.currentTimeMillis()
+        val useSpeedbridge = !isDiagonal // Only speedbridge on straight bridges
+        
+        TimeUtils.setInterval({
+            checkCount++
+            
+            val p = BedwarsAFK.mc.thePlayer
+            val w = BedwarsAFK.mc.theWorld
+            
+            if (p == null || w == null) {
+                this.cancel()
+                Movement.stopBackward()
+                Movement.stopSneaking()
+                onComplete()
+                return@setInterval
+            }
+
+            // Check if we're still on solid ground (safety check)
+            val playerBlock = BlockPos(p.posX, p.posY, p.posZ)
+            val blockBelow = w.getBlockState(playerBlock.down()).block
+            val blockAtFeet = w.getBlockState(playerBlock).block
+            
+            // We need to be actually falling (not just standing at edge) to trigger placement
+            if (blockBelow.material == Material.air && blockAtFeet.material == Material.air && !p.onGround) {
+                // CRITICAL: We're in the air! Force sneak immediately and place block
+                if (enableSpeedBridging && useSpeedbridge && !p.isSneaking) {
+                    Movement.startSneaking()
+                    speedbridgeCycle = 0 // Reset cycle
+                }
                 
-                if (itemName.contains("cloth") || itemName.contains("wool") || displayName.contains("wool")) {
-                    player.inventory.currentItem = i
-                    return true
+                // We're in the air! Try to place block immediately
+                val placed = placeBlockBehind(player, w)
+                if (!placed) {
+                    consecutiveFailures++
+                    
+                    if (consecutiveFailures > 40) {
+                        ChatUtils.error("Can't place blocks after 40 attempts! Stopping to prevent void fall")
+                        this.cancel()
+                        Movement.stopBackward()
+                        Movement.stopSprinting()
+                        // Keep sneaking for safety!
+                        TimeUtils.setTimeout({
+                            Movement.stopSneaking()
+                            onComplete()
+                        }, 1000)
+                        return@setInterval
+                    }
+                } else {
+                    consecutiveFailures = 0
+                }
+            } else {
+                consecutiveFailures = 0
+            }
+            
+            // Try to place block with configurable cooldown
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastPlacementTime >= placementCooldownMs) {
+                val placed = placeBlockBehind(p, w)
+                if (placed) {
+                    lastPlacementTime = currentTime
                 }
             }
-        }
-        
-        return false
+            
+            // Check if we reached the target
+            val dist = player.getDistance(target.x + 0.5, target.y.toDouble(), target.z + 0.5)
+            val isOnSolidGround = w.getBlockState(playerBlock.down()).block.material.isSolid
+            
+            if ((dist < 0.75 && isOnSolidGround) || checkCount >= maxChecks) {
+                this.cancel()
+                
+                // CRITICAL: Stop ALL movement BEFORE unshifting!
+                Movement.stopBackward()
+                Movement.stopSprinting()
+                
+                // Wait for movement to stop, THEN unshift
+                TimeUtils.setTimeout({
+                    Movement.stopSneaking()
+                    Mouse.stopTracking()
+                    
+                    if (dist < 1.0) {
+                        ChatUtils.info("${EnumChatFormatting.GREEN}✓ Bridge complete!")
+                    } else {
+                        ChatUtils.info("${EnumChatFormatting.YELLOW}⚠ Bridge timeout")
+                    }
+                    
+                    // Final nudge to center if needed
+                    if (dist < 1.0) {
+                        AdvancedPathfinder.goTo(target.x, target.y, target.z) {
+                            onComplete()
+                        }
+                    } else {
+                        TimeUtils.setTimeout({ onComplete() }, 200)
+                    }
+                }, 300)
+            }
+        }, 0, 50)
     }
     
+    /**
+     * Stand on top of the target block and save it as a generator
+     */
     /**
      * Stand on top of the target block and save it as a generator
      */
@@ -753,7 +878,7 @@ object BridgingPathfinder {
             }, 1000)
         }
     }
-    
+
     /**
      * Return to the starting position
      */
@@ -782,15 +907,16 @@ object BridgingPathfinder {
             onComplete()
         }
     }
-    
+
     /**
-     * Get the saved diamond generator position
+     * Get saved generator position
      */
     fun getSavedGeneratorPos(): BlockPos? = savedGeneratorPos
-    
+
     /**
      * Stop bridging pathfinder
      */
+    @JvmStatic
     fun stop() {
         isActive = false
         currentPath.clear()
@@ -799,106 +925,24 @@ object BridgingPathfinder {
         startingPosition = null
         Movement.clearAll()
         Mouse.stopTracking()
-        PathRenderer.clearPath()
+        updatePathRenderer() // Will clear path since isActive is false
         ChatUtils.info("${EnumChatFormatting.YELLOW}Bridging stopped")
     }
     
-    /**
-     * Check if currently active
-     */
-    fun isActive(): Boolean = isActive
+    init {
+        // Update path renderer when waypoint changes
+        PathRenderer.setPath(currentPath)
+    }
     
     /**
-     * Render the bridging path
+     * Update path renderer when path changes
      */
-    @SubscribeEvent
-    fun onRenderWorld(event: RenderWorldLastEvent) {
-        if (!isActive || currentPath.isEmpty()) return
-        
-        val player = BedwarsAFK.mc.thePlayer ?: return
-        val renderManager = BedwarsAFK.mc.renderManager
-        
-        GlStateManager.pushMatrix()
-        GlStateManager.disableTexture2D()
-        GlStateManager.enableBlend()
-        GlStateManager.disableAlpha()
-        GlStateManager.tryBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0)
-        GlStateManager.disableDepth()
-        
-        val tessellator = Tessellator.getInstance()
-        val worldRenderer = tessellator.worldRenderer
-        
-        // Render each waypoint in the path
-        for ((index, pos) in currentPath.withIndex()) {
-            val x = pos.x - renderManager.viewerPosX
-            val y = pos.y - renderManager.viewerPosY
-            val z = pos.z - renderManager.viewerPosZ
-            
-            val box = AxisAlignedBB(x, y, z, x + 1.0, y + 0.2, z + 1.0)
-            
-            // Color coding:
-            // Green = completed waypoints
-            // Yellow = current waypoint
-            // Cyan = upcoming waypoints
-            // Red = target block
-            val (r, g, b, a) = when {
-                index < currentWaypointIndex -> floatArrayOf(0.0f, 1.0f, 0.0f, 0.3f) // Green (completed)
-                index == currentWaypointIndex -> floatArrayOf(1.0f, 1.0f, 0.0f, 0.5f) // Yellow (current)
-                index == currentPath.size - 1 -> floatArrayOf(1.0f, 0.0f, 0.0f, 0.6f) // Red (target)
-                else -> floatArrayOf(0.0f, 1.0f, 1.0f, 0.3f) // Cyan (upcoming)
-            }
-            
-            // Draw filled box
-            worldRenderer.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR)
-            
-            // Top face only for cleaner look
-            worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-            worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-            worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, a).endVertex()
-            worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, a).endVertex()
-            
-            tessellator.draw()
-            
-            // Draw outline
-            GL11.glLineWidth(2.0f)
-            worldRenderer.begin(GL11.GL_LINE_STRIP, DefaultVertexFormats.POSITION_COLOR)
-            
-            worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, 1.0f).endVertex()
-            worldRenderer.pos(box.maxX, box.maxY, box.minZ).color(r, g, b, 1.0f).endVertex()
-            worldRenderer.pos(box.maxX, box.maxY, box.maxZ).color(r, g, b, 1.0f).endVertex()
-            worldRenderer.pos(box.minX, box.maxY, box.maxZ).color(r, g, b, 1.0f).endVertex()
-            worldRenderer.pos(box.minX, box.maxY, box.minZ).color(r, g, b, 1.0f).endVertex()
-            
-            tessellator.draw()
+    private fun updatePathRenderer() {
+        if (isActive && currentPath.isNotEmpty()) {
+            PathRenderer.setPath(currentPath)
+            PathRenderer.setWaypointIndex(currentWaypointIndex)
+        } else {
+            PathRenderer.clearPath()
         }
-        
-        // Draw line connecting waypoints
-        if (currentPath.size > 1) {
-            GL11.glLineWidth(3.0f)
-            worldRenderer.begin(GL11.GL_LINE_STRIP, DefaultVertexFormats.POSITION_COLOR)
-            
-            for ((index, pos) in currentPath.withIndex()) {
-                val x = pos.x + 0.5 - renderManager.viewerPosX
-                val y = pos.y + 0.1 - renderManager.viewerPosY
-                val z = pos.z + 0.5 - renderManager.viewerPosZ
-                
-                val (r, g, b) = when {
-                    index < currentWaypointIndex -> floatArrayOf(0.0f, 1.0f, 0.0f) // Green
-                    index == currentWaypointIndex -> floatArrayOf(1.0f, 1.0f, 0.0f) // Yellow
-                    else -> floatArrayOf(0.0f, 1.0f, 1.0f) // Cyan
-                }
-                
-                worldRenderer.pos(x, y, z).color(r, g, b, 0.8f).endVertex()
-            }
-            
-            tessellator.draw()
-        }
-        
-        GlStateManager.enableDepth()
-        GlStateManager.enableAlpha()
-        GlStateManager.disableBlend()
-        GlStateManager.enableTexture2D()
-        GlStateManager.popMatrix()
     }
 }
-
