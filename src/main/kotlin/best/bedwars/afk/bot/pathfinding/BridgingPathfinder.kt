@@ -538,9 +538,9 @@ object BridgingPathfinder {
         // Calculate the block behind player based on yaw
         val blockBehindPlayer = when {
             bridgingYaw < -135 || bridgingYaw > 135 -> BlockPos(player.posX, player.posY, player.posZ + 1) // Facing north
-            bridgingYaw < -45 -> BlockPos(player.posX + 1, player.posY, player.posZ) // Facing west
+            bridgingYaw < 135 -> BlockPos(player.posX + 1, player.posY, player.posZ) // Facing west
             bridgingYaw < 45 -> BlockPos(player.posX, player.posY, player.posZ - 1) // Facing south
-            bridgingYaw < 135 -> BlockPos(player.posX - 1, player.posY, player.posZ) // Facing east
+            bridgingYaw < -45 -> BlockPos(player.posX - 1, player.posY, player.posZ) // Facing east
             else -> BlockPos(player.posX, player.posY, player.posZ + 1) // Facing north (wrap)
         }
         
@@ -580,10 +580,10 @@ object BridgingPathfinder {
         // We're sneaking so we can't fall, and placing early is better than late
         val yaw = (player.rotationYaw % 360 + 360) % 360 // Normalize to 0-360
         val isNearEdge = when {
-            yaw > 315 || yaw <= 45 -> fracZ < 0.5  // Facing north (-Z)
-            yaw <= 135 -> fracX < 0.5              // Facing east (+X)
-            yaw <= 225 -> fracZ > 0.5              // Facing south (+Z)
-            yaw <= 315 -> fracX > 0.5              // Facing west (-X)
+            yaw < -135 || yaw <= 45 -> fracZ < 0.5  // Facing north (-Z)
+            yaw < -45-> fracX < 0.5              // Facing east (+X)
+            yaw < 45 -> fracZ > 0.5              // Facing south (+Z)
+            yaw < -45 -> fracX > 0.5              // Facing west (-X)
             else -> fracZ < 0.5                     // Facing north (wrap)
         }
         
@@ -732,7 +732,7 @@ object BridgingPathfinder {
             preparationPhase = false 
             ChatUtils.info("${EnumChatFormatting.GREEN}✓ Bridge preparation complete")
             startBridging(player, target, isDiagonal, onComplete)
-        }, 1500) // 1.5s preparation time
+        }, 2500) // 1.5s preparation time
     }
 
     /**
@@ -784,7 +784,7 @@ object BridgingPathfinder {
                 if (!placed) {
                     consecutiveFailures++
                     
-                    if (consecutiveFailures > 40) {
+                    if (consecutiveFailures > 30) {
                         ChatUtils.error("Can't place blocks after 40 attempts! Stopping to prevent void fall")
                         this.cancel()
                         Movement.stopBackward()

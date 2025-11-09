@@ -147,7 +147,7 @@ object EagleBridge {
         val world = BedwarsAFK.mc.theWorld ?: return false
 
         // Get block under player
-        val pos = BlockPos(player.posX, player.posY - 0.5, player.posZ)
+        val pos = BlockPos(player.posX, player.posY - 1, player.posZ)
         if (world.getBlockState(pos).block == Blocks.air) {
             return false // No block directly under player
         }
@@ -357,10 +357,10 @@ object EagleBridge {
         
         // Determine the facing direction (which face of clickOnPos to click on)
         val facing = when {
-            dx > 0 -> EnumFacing.WEST   // PlacePos is east of clickOnPos, so click on west face
-            dx < 0 -> EnumFacing.EAST   // PlacePos is west of clickOnPos, so click on east face
-            dz > 0 -> EnumFacing.NORTH  // PlacePos is south of clickOnPos, so click on north face
-            dz < 0 -> EnumFacing.SOUTH  // PlacePos is north of clickOnPos, so click on south face
+            dx < 0 -> EnumFacing.WEST   // PlacePos is east of clickOnPos, so click on west face
+            dx > 0 -> EnumFacing.EAST   // PlacePos is west of clickOnPos, so click on east face
+            dz < 0 -> EnumFacing.NORTH  // PlacePos is south of clickOnPos, so click on north face
+            dz > 0 -> EnumFacing.SOUTH  // PlacePos is north of clickOnPos, so click on south face
             else -> EnumFacing.UP       // Fallback
         }
         
