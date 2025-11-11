@@ -64,6 +64,9 @@ object AdvancedPathfinder {
     private var isTransitioningFromBridge = false
     private var waitingForRotation = false
     private var bridgeSafetyNodesRemaining = 0 // Counter for +2 safety nodes after bridge section
+    private var bridgeModeEnterTime = 0L // Track when bridge mode was activated
+    private var bridgeValidationStartTime = 0L // Track when bridge completion validation started
+    private val bridgeValidationDelayMs = 200 // Delay before checking if bridge is complete (ms)
     
     // Speedbridge tracking (for straight bridges only)
     private var speedbridgeCycle = 0 // 0 = sneak, 1 = unsneak
@@ -162,8 +165,10 @@ object AdvancedPathfinder {
         isTransitioningFromBridge = false
         waitingForRotation = false
         bridgeSafetyNodesRemaining = 0
+        bridgeModeEnterTime = 0L
         
-        // Stop eagle bridging if it was active
+        // CRITICAL: Stop eagle bridging completely if it was active
+        // Must call stopBridging() directly to ensure all internal EagleBridge state is cleaned
         if (EagleBridge.isBridging()) {
             EagleBridge.stopBridging()
         }
@@ -239,6 +244,10 @@ object AdvancedPathfinder {
     /**
      * Get all valid neighboring positions in 3D space
      * This is the KEY function that enables obstacle avoidance!
+     * 
+     * CRITICAL FIX: After bridging to solid ground, the algorithm must be able to recognize
+     * that WALK paths are now viable from that position. This prevents the bot from being
+     * locked into continued bridging when it reaches an island with solid ground.
      */
     private fun getNeighbors3D(world: World, current: Node): List<Node> {
         val neighbors = mutableListOf<Node>()
@@ -260,12 +269,27 @@ object AdvancedPathfinder {
             BlockPos(-1, 0, -1)  // NW
         )
 
-        // Check all horizontal movements (same Y level)
+        // CRITICAL: Detect if we just landed on solid ground after bridging
+        // If current node is a BRIDGE and ground is now solid, enable normal WALK exploration
+        val hasLandedOnSolidGround = current.actionType == ActionType.BRIDGE && 
+                                      isPositionWalkable(world, pos)
+
+        // Check all horizontal movements (same Y level) - WITH INTERMEDIATE WAYPOINTS
         for (dir in cardinalDirections + diagonalDirections) {
             val neighborPos = pos.add(dir)
             
             if (canWalkTo(world, pos, neighborPos)) {
                 neighbors.add(Node(neighborPos, current, 0.0, 0.0, false, ActionType.WALK))
+                
+                // Add intermediate waypoints every 2-3 blocks for walking (finer granularity)
+                if (denseVerticalWaypoints) {
+                    for (distance in 2..3) {
+                        val intermediatePos = pos.add(dir.x * distance, 0, dir.z * distance)
+                        if (canWalkTo(world, pos, intermediatePos)) {
+                            neighbors.add(Node(intermediatePos, current, 0.0, 0.0, false, ActionType.WALK))
+                        }
+                    }
+                }
             }
             // Check jump up 1 block
             else if (canJumpTo(world, pos, neighborPos)) {
@@ -337,18 +361,60 @@ object AdvancedPathfinder {
             }
         }
         
+        // CRITICAL FIX: When transitioning from bridge to solid ground, search downward
+        // to find the actual island walkable surface. This prevents being stuck at floating
+        // block height and allows proper transition to WALK mode on the island.
+        if (hasLandedOnSolidGround && current.actionType == ActionType.BRIDGE) {
+            // Look down to find walkable ground (searching further than normal fall distance)
+            for (fallDistance in 1..8) {
+                val downPos = pos.down(fallDistance)
+                
+                // Check if this position is walkable
+                if (isPositionWalkable(world, downPos)) {
+                    // Verify path is clear between current and landing
+                    var pathClear = true
+                    for (i in 1..fallDistance) {
+                        val checkPos = pos.down(i)
+                        val feetBlock = world.getBlockState(checkPos).block
+                        val headBlock = world.getBlockState(checkPos.up()).block
+                        if (!isPassable(feetBlock) || !isPassable(headBlock)) {
+                            pathClear = false
+                            break
+                        }
+                    }
+                    
+                    if (pathClear) {
+                        // Add as WALK node with lower cost to prefer direct descent to walkable ground
+                        neighbors.add(Node(downPos, current, 0.0, 0.0, false, ActionType.WALK))
+                        break // Found walkable island surface
+                    }
+                }
+            }
+        }
+        
         // Check bridging across void (only cardinal directions for safety)
         for (dir in cardinalDirections) {
-            // Try to bridge up to 10 blocks
+            // Try to bridge up to 10 blocks with INTERMEDIATE WAYPOINTS
+            var lastValidBridgePos: BlockPos? = null
             for (bridgeDistance in 1..10) {
                 val bridgePos = pos.add(dir.x * bridgeDistance, 0, dir.z * bridgeDistance)
                 
                 // Check if we can bridge to this position
                 if (canBridgeTo(world, pos, bridgePos, bridgeDistance)) {
-                    // Add bridge node with needsBlockPlace = true
-                    neighbors.add(Node(bridgePos, current, 0.0, 0.0, true, ActionType.BRIDGE))
-                    break // Only add one bridge distance per direction
+                    lastValidBridgePos = bridgePos
+                    
+                    // Add intermediate waypoints every 2-3 blocks for better control
+                    if (bridgeDistance % 2 == 0 || bridgeDistance % 3 == 0) {
+                        neighbors.add(Node(bridgePos, current, 0.0, 0.0, true, ActionType.BRIDGE))
+                    }
+                } else {
+                    // Stop at first invalid position
+                    break
                 }
+            }
+            // Add final bridge position if we found valid bridges
+            if (lastValidBridgePos != null) {
+                neighbors.add(Node(lastValidBridgePos, current, 0.0, 0.0, true, ActionType.BRIDGE))
             }
         }
 
@@ -362,43 +428,47 @@ object AdvancedPathfinder {
         // Must have blocks in inventory to bridge
         if (EagleBridge.getBlockCount() == 0) return false
         
+        // CRITICAL: Allow bridging 2-3 blocks BEFORE reaching the void
+        // This gives safety margin and prevents falling off the edge
+        var hasVoidBelow = false
+        var distanceToVoid = 0
+        
+        // Look ahead in the direction of movement to find void
+        for (i in 1..5) {
+            val checkPos = from.add(
+                if (to.x > from.x) i else if (to.x < from.x) -i else 0,
+                0,
+                if (to.z > from.z) i else if (to.z < from.z) -i else 0
+            )
+            
+            var hasVoidAtThisPos = true
+            for (j in 1..10) {
+                if (world.getBlockState(checkPos.down(j)).block.material.isSolid) {
+                    hasVoidAtThisPos = false
+                    break
+                }
+            }
+            
+            if (hasVoidAtThisPos) {
+                hasVoidBelow = true
+                distanceToVoid = i
+                break
+            }
+        }
+        
+        // Allow bridging if void is detected within 2-3 blocks ahead
+        // This provides safety margin without activating too early
+        if (!hasVoidBelow || distanceToVoid > 3) {
+            return false
+        }
+        
         // Check if target position would be walkable (has ground or can place ground)
         val targetGround = world.getBlockState(to).block
         
         // If target already has ground, check if it's walkable
-        // IMPORTANT: Still allow bridging TO solid ground to complete the bridge
         if (targetGround.material.isSolid) {
             return isPositionWalkable(world, to)
         }
-        
-        // Check if there's void below target OR if we're currently over void
-        // We need to check BOTH from and to positions
-        val fromPos = from
-        var hasVoidAtStart = true
-        for (i in 1..10) {
-            val checkPos = fromPos.down(i)
-            if (world.getBlockState(checkPos).block.material.isSolid) {
-                hasVoidAtStart = false
-                break
-            }
-        }
-        
-        // If starting position has void below, we MUST continue bridging
-        // even if target has solid ground nearby (to complete the bridge)
-        if (hasVoidAtStart) return true
-        
-        // Otherwise check if target has void
-        var hasVoidBelow = true
-        for (i in 1..10) {
-            val checkPos = to.down(i)
-            if (world.getBlockState(checkPos).block.material.isSolid) {
-                hasVoidBelow = false
-                break
-            }
-        }
-        
-        // Only allow bridging if there's void somewhere
-        if (!hasVoidBelow) return false
         
         // Check if path is clear (no blocks in the way)
         for (i in 1 until distance) {
@@ -413,17 +483,15 @@ object AdvancedPathfinder {
             if (blockAt.material.isSolid || blockAbove.material.isSolid) return false
         }
         
-        // Check if there's a solid landing spot OR if we can reach solid ground
-        // Look ahead to see if there's solid ground at the target
+        // Check if there's a solid landing spot
         for (i in 0..5) {
             val landingCheck = to.down(i)
             if (world.getBlockState(landingCheck).block.material.isSolid) {
-                // Found solid ground, check if reachable
-                return i <= distance // Can bridge if ground is within bridging distance
+                return i <= distance
             }
         }
         
-        return true // Allow bridging even if we don't see landing (might be far island)
+        return true
     }
 
     /**
@@ -811,7 +879,7 @@ object AdvancedPathfinder {
      */
     private fun followPath(onComplete: () -> Unit) {
         isFollowingPath = true
-        val path = currentPath ?: return
+        var path = currentPath?.toMutableList() ?: return
 
         if (debugMode) {
             ChatUtils.info("§6[Pathfinder] §7Following path")
@@ -938,9 +1006,8 @@ object AdvancedPathfinder {
                     if (isTransitioningFromBridge) {
                         val transitionElapsed = System.currentTimeMillis() - bridgeExitTime
                         if (transitionElapsed < 500) {
-                            // Still in 500ms pause - stay still and keep sneaking
+                            // Still in 500ms pause - stay completely still (no sneaking)
                             Movement.clearAll()
-                            Movement.startSneak()
                             return
                         } else {
                             // Pause complete - unshift and start waiting for rotation
@@ -983,10 +1050,60 @@ object AdvancedPathfinder {
                     if (lastPlayerPos != null && lastPlayerPos == currentPlayerPos) {
                         stuckCounter++
                         if (stuckCounter > 60) { // Stuck for 3 seconds
-                            if (debugMode) ChatUtils.error("§c[Pathfinder] §7Stuck! Cancelling")
-                            stop()
-                            cancel()
-                            onComplete()
+                            if (debugMode) ChatUtils.error("§c[Pathfinder] §7Stuck detected! Adding intermediate waypoints")
+                            
+                            // Try to add intermediate waypoints between stuck position and next waypoint
+                            val stuckPos = currentPlayerPos
+                            val nextPos = path[currentPathIndex].pos
+                            
+                            // Calculate intermediate waypoints (every 0.5-1 block between stuck and next)
+                            val diffX = nextPos.x - stuckPos.x
+                            val diffZ = nextPos.z - stuckPos.z
+                            val distance = sqrt((diffX * diffX + diffZ * diffZ).toDouble())
+                            
+                            if (distance > 0) {
+                                // Create intermediate waypoints at 0.5 block intervals
+                                val stepCount = (distance * 2).toInt() + 1
+                                val newWaypoints = mutableListOf<Node>()
+                                
+                                for (i in 1..stepCount) {
+                                    val progress = i.toDouble() / (stepCount + 1)
+                                    val intermediateX = stuckPos.x + (diffX * progress).toInt()
+                                    val intermediateZ = stuckPos.z + (diffZ * progress).toInt()
+                                    
+                                    // Try to find walkable height at this intermediate position
+                                    var intermediateY = stuckPos.y
+                                    for (yOffset in 0..3) {
+                                        val checkPos = BlockPos(intermediateX, stuckPos.y + yOffset, intermediateZ)
+                                        val blockBelow = world.getBlockState(checkPos.down()).block
+                                        if (blockBelow.material.isSolid) {
+                                            intermediateY = checkPos.y
+                                            break
+                                        }
+                                    }
+                                    
+                                    val intermediateWaypoint = Node(
+                                        BlockPos(intermediateX, intermediateY, intermediateZ),
+                                        if (newWaypoints.isEmpty()) path[currentPathIndex - 1] else newWaypoints.last(),
+                                        0.0, 0.0, false, ActionType.WALK
+                                    )
+                                    newWaypoints.add(intermediateWaypoint)
+                                }
+                                
+                                // Insert the new waypoints into the path at current position
+                                if (newWaypoints.isNotEmpty()) {
+                                    val newPath = path.take(currentPathIndex).toMutableList()
+                                    newPath.addAll(newWaypoints)
+                                    newPath.addAll(path.drop(currentPathIndex))
+                                    path = newPath
+                                    currentPath = path // Update the stored path
+                                    if (debugMode) ChatUtils.info("§2[Unstuck] §7Added ${newWaypoints.size} intermediate waypoints")
+                                }
+                            }
+                            
+                            // Reset stuck counter to try navigating with new waypoints
+                            stuckCounter = 0
+                            lastPlayerPos = null
                             return
                         }
                     } else {
@@ -1023,9 +1140,8 @@ object AdvancedPathfinder {
 
                     // Check if reached waypoint
                     // Accept both feet contact (diffY check) AND head contact (player head within node bounds)
-                    val isInBridgeEndPhase = bridgeModeActive && 
-                                             (currentNode.actionType != ActionType.BRIDGE || bridgeSafetyNodesRemaining > 0)
-                    val distanceThreshold = if (isInBridgeEndPhase) 0.3 else 0.8 // Stricter for bridge end
+                    // Use stricter threshold during bridging since we need precise placement
+                    val distanceThreshold = if (bridgeModeActive) 0.3 else 0.8
                     
                     // For MANDATORY nodes (tight elevation areas), require EXACT foot placement
                     val reachedWaypoint = if (currentNode.isMandatory) {
@@ -1048,38 +1164,142 @@ object AdvancedPathfinder {
                     }
                     
                     if (reachedWaypoint) {
-                        // Detect when we finish the last BRIDGE node - start safety counter
-                        if (bridgeModeActive && currentNode.actionType == ActionType.BRIDGE) {
-                            val nextIsNotBridge = currentPathIndex + 1 >= path.size || 
-                                                  path[currentPathIndex + 1].actionType != ActionType.BRIDGE
-                            if (nextIsNotBridge) {
-                                // This is the last BRIDGE node - activate +2 safety nodes
-                                bridgeSafetyNodesRemaining = 2
-                                if (debugMode) ChatUtils.info("§6[Pathfinder] §7Last bridge node - extending +2 safety nodes")
+                        // Critical: If in bridge mode, check if we're still over void
+                        // If so, DON'T exit bridge mode yet - continue bridging until solid ground
+                        if (bridgeModeActive && hasVoidBelow(player, world)) {
+                            if (debugMode) ChatUtils.info("§6[Pathfinder] §7Reached waypoint but still over void - continuing bridge")
+                            // Don't advance waypoint, stay in place and keep bridging
+                            return
+                        }
+                        
+                        // Check if in bridge mode at any waypoint to evaluate exit conditions
+                        if (bridgeModeActive) {
+                            // ENHANCED BRIDGE COMPLETION VALIDATION - CHECKED AT EVERY WAYPOINT WITH DELAY
+                            // Initialize delay timer on first check
+                            if (bridgeValidationStartTime == 0L) {
+                                bridgeValidationStartTime = System.currentTimeMillis()
+                                if (debugMode) {
+                                    ChatUtils.info("§6[Bridge Check] §7Started validation delay: ${bridgeValidationDelayMs}ms")
+                                }
+                            }
+                            
+                            val timeSinceBridgeCheck = System.currentTimeMillis() - bridgeValidationStartTime
+                            val delayPassed = timeSinceBridgeCheck >= bridgeValidationDelayMs
+                            
+                            if (debugMode && !delayPassed) {
+                                ChatUtils.info("§6[Bridge Check] §7Waiting... ${timeSinceBridgeCheck}ms/${bridgeValidationDelayMs}ms")
+                            }
+                            
+                            // Only perform validation checks after delay has passed
+                            if (delayPassed) {
+                                // Get blocks around player position
+                                val blockBelowPos = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
+                                val blockBelow = world.getBlockState(blockBelowPos).block
+                                
+                                // Calculate behind positions based on player's yaw
+                                val yaw = player.rotationYaw
+                                val behindPos1 = when {
+                                    yaw in -45f..45f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() - 1)
+                                    yaw in 45f..135f -> BlockPos(player.posX.toInt() - 1, player.posY.toInt() - 1, player.posZ.toInt())
+                                    yaw in 135f..180f || yaw in -180f..-135f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() + 1)
+                                    else -> BlockPos(player.posX.toInt() + 1, player.posY.toInt() - 1, player.posZ.toInt())
+                                }
+                                
+                                val behindPos2 = when {
+                                    yaw in -45f..45f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() - 2)
+                                    yaw in 45f..135f -> BlockPos(player.posX.toInt() - 2, player.posY.toInt() - 1, player.posZ.toInt())
+                                    yaw in 135f..180f || yaw in -180f..-135f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() + 2)
+                                    else -> BlockPos(player.posX.toInt() + 2, player.posY.toInt() - 1, player.posZ.toInt())
+                                }
+                                
+                                val blockBehind1 = world.getBlockState(behindPos1).block
+                                val blockBehind2 = world.getBlockState(behindPos2).block
+                                
+                                // PRIMARY CHECK: Bridge completion (solid below + solid behind)
+                                val hasSolidBelow = blockBelow != Blocks.air
+                                val hasSolidBehind = blockBehind1 != Blocks.air || blockBehind2 != Blocks.air
+                                val isBridgeComplete = hasSolidBelow && hasSolidBehind
+                                
+                                // SECONDARY CHECK: Not still falling (safety net)
+                                val isPlayerFalling = player.motionY < -0.5
+                                
+                                // TERTIARY CHECK: Player is on ground or stable
+                                val isPlayerStable = player.onGround
+                                
+                                // DIAGNOSTIC: Log all checks if debug mode enabled
+                                if (debugMode) {
+                                    ChatUtils.info("§6[Bridge Check @ WP] Below: ${blockBelow.getLocalizedName()} | " +
+                                        "Behind1: ${blockBehind1.getLocalizedName()} | " +
+                                        "Behind2: ${blockBehind2.getLocalizedName()} | " +
+                                        "Falling: $isPlayerFalling | Stable: $isPlayerStable | Complete: $isBridgeComplete")
+                                }
+                                
+                                // FINAL DECISION: Exit only if all critical checks pass
+                                if (isBridgeComplete && !isPlayerFalling && isPlayerStable) {
+                                    // Bridge is fully connected AND player is safe - exit bridge mode
+                                    Movement.clearAll()
+                                    EagleBridge.stopBridging() // Directly stop, don't use deactivateBridge
+                                    bridgeModeActive = false
+                                    bridgeValidationStartTime = 0L // Reset delay timer
+                                    isTransitioningFromBridge = true
+                                    bridgeExitTime = System.currentTimeMillis()
+                                    bridgeSafetyNodesRemaining = 0
+                                    
+                                    if (debugMode) {
+                                        val timeSinceBridgeStart = System.currentTimeMillis() - bridgeModeEnterTime
+                                        ChatUtils.info("§a[Bridge Exit] §7Complete after ${timeSinceBridgeStart}ms at waypoint - " +
+                                            "Below: ✓ Behind: ✓ Stable: ✓ FallRate: ${player.motionY}")
+                                    }
+                                    
+                                    // CHECK: Can the bot safely drop down from this position?
+                                    // Look down up to 4 blocks to find safe landing
+                                    var canDropSafely = false
+                                    var safeDropDistance = 0
+                                    for (dropDistance in 1..4) {
+                                        val checkPos = BlockPos(player.posX.toInt(), player.posY.toInt() - dropDistance, player.posZ.toInt())
+                                        val checkBlock = world.getBlockState(checkPos).block
+                                        val checkBlockBelow = world.getBlockState(checkPos.down()).block
+                                        
+                                        // Found solid ground within 1 block below
+                                        if (checkBlockBelow.material.isSolid && checkBlock == Blocks.air) {
+                                            canDropSafely = true
+                                            safeDropDistance = dropDistance
+                                            break
+                                        }
+                                    }
+                                    
+                                    if (debugMode) {
+                                        if (canDropSafely) {
+                                            ChatUtils.info("§2[Drop Check] ✓ §7Safe drop found at ${safeDropDistance} block(s) below")
+                                        } else {
+                                            ChatUtils.info("§e[Drop Check] ⚠ §7No safe drop zone found within 4 blocks")
+                                        }
+                                    }
+                                } else {
+                                    // Bridge not fully complete OR player unstable - continue bridging
+                                    if (debugMode) {
+                                        val reason = when {
+                                            !hasSolidBelow -> "no solid below"
+                                            !hasSolidBehind -> "no solid behind"
+                                            isPlayerFalling -> "player falling (motionY: ${player.motionY})"
+                                            !isPlayerStable -> "player not on ground"
+                                            else -> "unknown"
+                                        }
+                                        ChatUtils.info("§c[Bridge Continue] §7Reason: $reason at waypoint")
+                                    }
+                                    currentPathIndex++
+                                    PathRenderer.setWaypointIndex(currentPathIndex)
+                                    // Continue bridging - stay in bridge mode and keep going
+                                    return
+                                }
+                            } else {
+                                // Delay not passed yet - continue to next waypoint to accumulate check time
+                                currentPathIndex++
+                                PathRenderer.setWaypointIndex(currentPathIndex)
+                                return
                             }
                         }
                         
-                        // Decrement safety counter if active
-                        if (bridgeSafetyNodesRemaining > 0) {
-                            bridgeSafetyNodesRemaining--
-                            if (debugMode) ChatUtils.info("§6[Pathfinder] §7Safety node complete, ${bridgeSafetyNodesRemaining} remaining")
-                            
-                            // Exit bridge mode after completing all safety nodes
-                            if (bridgeSafetyNodesRemaining == 0) {
-                                // SIMPLE EXIT SEQUENCE:
-                                // 1. Stop movement completely
-                                Movement.clearAll()
-                                
-                                // 2. Deactivate bridge mode
-                                bridgeModeActive = false
-                                
-                                // 3. Start 500ms pause before resuming
-                                isTransitioningFromBridge = true
-                                bridgeExitTime = System.currentTimeMillis()
-                                
-                                if (debugMode) ChatUtils.info("§6[Pathfinder] §7Exited bridge (+2 safety complete), pausing...")
-                            }
-                        }
                         if (debugMode) ChatUtils.info("§a✓ §7Waypoint §f${currentPathIndex + 1}")
                         currentPathIndex++
                         PathRenderer.setWaypointIndex(currentPathIndex)
@@ -1288,16 +1508,76 @@ object AdvancedPathfinder {
                             // Just walk forward and let gravity do its thing
                         }
                         ActionType.WALK -> {
-                            // Enhanced auto-jump logic:
-                            // 1. Jump if collided horizontally
-                            // 2. Jump if next waypoint is higher than current position
-                            val needsJump = player.onGround && currentTime - lastJumpTime > 500 && (
-                                player.isCollidedHorizontally ||
-                                (diffY > 0.2 && horizontalDistance < 2.0)
-                            )
-                            if (needsJump) {
-                                player.jump()
-                                lastJumpTime = currentTime
+                            // If we're in bridge mode, continue bridging
+                            if (bridgeModeActive) {
+                                // Continue eagle bridging - place blocks
+                                Movement.stopBackward()
+                                Movement.startBackward()
+                                
+                                // Determine if this is a diagonal bridge based on movement direction
+                                val absDiffX = abs(diffX)
+                                val absDiffZ = abs(diffZ)
+                                val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5 // Both X and Z movement
+                                
+                                // Check for block placement by monitoring hotbar block count
+                                val currentBlockCount = countBlocksInHotbar()
+                                if (currentBlockCount < lastBlockCount && lastBlockCount > 0) {
+                                    // Block was placed!
+                                    blocksPlacedCount++
+                                    canSpeedbridge = true
+                                    if (debugMode) ChatUtils.info("§6[Bridge] §7Block placed! Total: ${blocksPlacedCount} (${currentBlockCount} blocks left)")
+                                    lastBlockCount = currentBlockCount
+                                    speedbridgeCycle = 0
+                                    lastSpeedbridgeToggle = currentTime
+                                } else if (lastBlockCount == 0) {
+                                    lastBlockCount = currentBlockCount
+                                }
+                                
+                                // SAFE SPEEDBRIDGE (straight bridges only)
+                                if (enableSpeedBridging && !isDiagonalBridge && player.onGround && canSpeedbridge) {
+                                    val timeSinceToggle = currentTime - lastSpeedbridgeToggle
+                                    
+                                    when {
+                                        speedbridgeCycle == 0 && timeSinceToggle > 300 -> {
+                                            Movement.stopSneaking()
+                                            speedbridgeCycle = 1
+                                            lastSpeedbridgeToggle = currentTime
+                                            if (debugMode) ChatUtils.info("§6[Speedbridge] §eUnsneak (${blocksPlacedCount} blocks)")
+                                        }
+                                        speedbridgeCycle == 1 && timeSinceToggle > 75 -> {
+                                            Movement.startSneaking()
+                                            speedbridgeCycle = 0
+                                            lastSpeedbridgeToggle = currentTime
+                                            if (debugMode) ChatUtils.info("§6[Speedbridge] §7Sneak (${blocksPlacedCount} blocks)")
+                                        }
+                                        speedbridgeCycle == 0 -> {
+                                            Movement.startSneaking()
+                                        }
+                                        speedbridgeCycle == 1 -> {
+                                            Movement.stopSneaking()
+                                        }
+                                    }
+                                } else {
+                                    Movement.startSneaking()
+                                }
+                            } else {
+                                // Normal walking mode - forward movement
+                                Movement.stopBackward()
+                                Movement.startForward()
+                                Movement.stopSneaking()
+                                
+                                // Enhanced auto-jump logic:
+                                // 1. Jump if collided horizontally
+                                // 2. Jump if next waypoint is higher than current position
+                                // BUT: Don't jump while transitioning from bridge
+                                val needsJump = !isTransitioningFromBridge && player.onGround && currentTime - lastJumpTime > 500 && (
+                                    player.isCollidedHorizontally ||
+                                    (diffY > 0.2 && horizontalDistance < 2.0)
+                                )
+                                if (needsJump) {
+                                    player.jump()
+                                    lastJumpTime = currentTime
+                                }
                             }
                         }
                         ActionType.BRIDGE -> {
@@ -1308,34 +1588,47 @@ object AdvancedPathfinder {
                                 // Skip bridge mode; treat as normal walk/fall
                                 if (debugMode) ChatUtils.info("§e[Pathfinder] §7Descending - skipping bridge")
                             } else if (!bridgeModeActive) {
-                                // Activate bridge mode when entering a BRIDGE node (if not already active)
-                                // Switch to blocks if not already holding them
-                                if (!EagleBridge.switchToBlocks()) {
-                                    if (debugMode) ChatUtils.error("§c[Pathfinder] No blocks in hotbar!")
-                                    stop()
-                                    cancel()
-                                    onComplete()
-                                    return
+                                // Only activate bridge mode on FIRST BRIDGE node of a section
+                                // Check if previous node was NOT a BRIDGE
+                                val previousNodeWasBridge = currentPathIndex > 0 && path[currentPathIndex - 1].actionType == ActionType.BRIDGE
+                                
+                                if (!previousNodeWasBridge) {
+                                    // This is the start of a new bridge section - activate bridge mode
+                                    if (!EagleBridge.switchToBlocks()) {
+                                        if (debugMode) ChatUtils.error("§c[Pathfinder] No blocks in hotbar!")
+                                        stop()
+                                        cancel()
+                                        onComplete()
+                                        return
+                                    }
+                                    
+                                    // Set proper camera angle for bridging BEFORE starting
+                                    // This ensures the bot is looking at the right angle before placing blocks
+                                    val bridgeYaw = player.rotationYaw + 180f  // Face backwards for eagle bridge
+                                    val bridgePitch = 83f  // Proper angle for bridging downward
+                                    
+                                    // Smoothly rotate to bridge angle (no blocking sleep - use timer-based state)
+                                    player.rotationYaw = bridgeYaw
+                                    player.rotationPitch = bridgePitch
+                                    // Note: EagleBridge will handle movement only - AdvancedPathfinder controls rotation
+                                    
+                                    // Activate eagle bridging and STAY IN IT for entire bridge section
+                                    // EagleBridge handles all movement and block placement internally
+                                    EagleBridge.activateBridge()
+                                    bridgeModeActive = true
+                                    bridgeModeEnterTime = System.currentTimeMillis() // Track when bridge mode started
+                                    bridgeValidationStartTime = 0L // Reset validation delay timer for new bridge section
+                                    speedbridgeCycle = 0 // Start in sneak phase
+                                    lastSpeedbridgeToggle = System.currentTimeMillis()
+                                    lastBlockCount = countBlocksInHotbar() // Initialize block count
+                                    blocksPlacedCount = 0 // Reset placement counter
+                                    canSpeedbridge = false // Disable until first block placed
+                                    if (debugMode) ChatUtils.info("§6[Pathfinder] §7Started eagle bridge section (${lastBlockCount} blocks)")
                                 }
-                                
-                                // Move back slightly from the edge before starting to bridge
-                                Movement.startBackward()
-                                Thread.sleep(100) // Small delay to ensure we're positioned correctly
-                                Movement.stopBackward()
-                                
-                                // Activate eagle bridging and STAY IN IT for entire bridge section
-                                EagleBridge.startBridging()
-                                bridgeModeActive = true
-                                speedbridgeCycle = 0 // Start in sneak phase
-                                lastSpeedbridgeToggle = System.currentTimeMillis()
-                                lastBlockCount = countBlocksInHotbar() // Initialize block count
-                                blocksPlacedCount = 0 // Reset placement counter
-                                canSpeedbridge = false // Disable until first block placed
-                                if (debugMode) ChatUtils.info("§6[Pathfinder] §7Started eagle bridge section (${lastBlockCount} blocks)")
                             }
                             
-                            // Stay in bridge mode - don't deactivate until we leave the BRIDGE nodes
-                            // The deactivation happens in the waypoint reached check above
+                            // Continue bridging - movement handled by EagleBridge
+                            // Bridge mode will be deactivated in waypoint reached check when next node is not BRIDGE
                         }
                         ActionType.PILLAR_UP -> {
                             // Pillaring up - place blocks beneath player and jump

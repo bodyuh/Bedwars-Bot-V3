@@ -19,6 +19,11 @@ import net.minecraftforge.fml.common.gameevent.TickEvent
 /**
  * Eagle bridging implementation for safe bridging across the void
  * Based on the Myau client's eagle bridging logic
+ * 
+ * CRITICAL: This is a PASSIVE bridging system. It should ONLY be active when
+ * AdvancedPathfinder explicitly calls startBridging(). All state management
+ * and bridge mode activation/deactivation must be coordinated by AdvancedPathfinder
+ * to prevent state desynchronization.
  */
 object EagleBridge {
     private var isBridging = false
@@ -44,6 +49,8 @@ object EagleBridge {
     private var isRotating = false // Track if we're currently rotating for placement
     private var readyToPlaceStartTime: Long? = null // Track when placement conditions first became true
     private var initialBlockCount: Int = 0 // Track initial block count for verification
+    private var strafeStartTime: Long? = null // Track when strafing started
+    private var strafeTarget: Pair<Double, Double>? = null // Target position for strafing (x, z)
     private val currentTime: Long
         get() = System.currentTimeMillis()
 
@@ -67,11 +74,24 @@ object EagleBridge {
 
         isBridging = true
         blocksPlaced = 0
-        lastPlaceTime = 0L
+        lastPlaceTime = System.currentTimeMillis() // Initialize to current time so cooldown works
         lastClickTime = 0L
         lastBlockPos = null // Reset last block position when starting
         readyToPlaceStartTime = null // Reset placement delay timer
         initialBlockCount = getBlockCount() // Track initial block count
+        
+        // Initialize strafing to center with very tight targeting to prevent drift
+        val player = BedwarsAFK.mc.thePlayer
+        if (player != null) {
+            val blockX = Math.floor(player.posX).toInt()
+            val blockZ = Math.floor(player.posZ).toInt()
+            // Use very small random buffer (±0.1) to prevent left/right shifting
+            val randomBufferX = (Math.random() - 0.5) * 0.2  // Range: -0.1 to 0.1
+            val randomBufferZ = (Math.random() - 0.5) * 0.2  // Range: -0.1 to 0.1
+            strafeTarget = Pair(blockX + 0.5 + randomBufferX, blockZ + 0.5 + randomBufferZ)
+            strafeStartTime = currentTime
+        }
+        
         ChatUtils.info("§6[EagleBridge] §7Started eagle bridging")
     }
 
@@ -84,6 +104,11 @@ object EagleBridge {
         Movement.stopSneak()
         Mouse.stopTracking() // Stop any rotation tracking
         isRotating = false
+        readyToPlaceStartTime = null
+        strafeTarget = null
+        strafeStartTime = null
+        lastProgressPos = null
+        stuckTicks = 0
         ChatUtils.info("§6[EagleBridge] §7Stopped eagle bridging")
     }
 
@@ -140,28 +165,44 @@ object EagleBridge {
     }
 
     /**
-     * Check if it's safe to move (no void below next position)
+     * Check if it's safe to move - verifies that bridge blocks behind the player are solid
+     * and that the player is standing on a solid block. This ensures bridge is complete.
      */
     fun canMoveSafely(): Boolean {
         val player = BedwarsAFK.mc.thePlayer ?: return false
         val world = BedwarsAFK.mc.theWorld ?: return false
 
-        // Get block under player
-        val pos = BlockPos(player.posX, player.posY - 1, player.posZ)
-        if (world.getBlockState(pos).block == Blocks.air) {
-            return false // No block directly under player
+        // FIRST: Check block directly below player (must be solid)
+        val playerBelowPos = BlockPos(player.posX, player.posY - 1, player.posZ)
+        val playerBelowBlock = world.getBlockState(playerBelowPos).block
+        if (playerBelowBlock == Blocks.air) {
+            // Player is over void, bridge incomplete
+            return false
         }
 
-        // Get block at the edge based on player's direction
+        // SECOND: Check blocks behind player (in the direction they're moving backwards)
+        // For eagle bridging, we're moving backwards, so we place blocks behind us
         val yaw = player.rotationYaw * Math.PI / 180.0
-        val edgeX = player.posX - MathHelper.sin(yaw.toFloat()) * 0.3
-        val edgeZ = player.posZ + MathHelper.cos(yaw.toFloat()) * 0.3
+        val backwardX = MathHelper.sin(yaw.toFloat())  // Backward direction in X
+        val backwardZ = -MathHelper.cos(yaw.toFloat()) // Backward direction in Z
         
-        // Check if we're at an edge
-        val edgePos = BlockPos(edgeX, player.posY - 1.0, edgeZ)
-        val hasBlockAtEdge = world.getBlockState(edgePos).block != Blocks.air
-
-        return hasBlockAtEdge
+        // Check 2 blocks behind the player to ensure bridge is solid
+        for (distance in 1..2) {
+            val checkX = (player.posX + backwardX * distance).toInt()
+            val checkY = (player.posY - 1.0).toInt()  // Check 1 block below player level
+            val checkZ = (player.posZ + backwardZ * distance).toInt()
+            
+            val pos = BlockPos(checkX, checkY, checkZ)
+            val block = world.getBlockState(pos).block
+            
+            // If any block behind the player is air (void), bridge isn't complete
+            if (block == Blocks.air) {
+                return false
+            }
+        }
+        
+        // All blocks checked are solid - bridge is complete
+        return true
     }
 
     /**
@@ -173,6 +214,48 @@ object EagleBridge {
         val player = BedwarsAFK.mc.thePlayer ?: return
         val world = BedwarsAFK.mc.theWorld ?: return
 
+        // CRITICAL: Keep player sneaking while bridging (required for eagle bridging)
+        if (shouldSneak() && !player.isSneaking) {
+            Movement.startSneaking()
+        } else if (!shouldSneak() && player.isSneaking) {
+            Movement.stopSneaking()
+        }
+
+        // Handle strafing to center during first part of bridge
+        if (strafeTarget != null && strafeStartTime != null) {
+            val strafeDuration = 150L // Shorter 150ms strafe to reduce jitter
+            val timeSinceStart = currentTime - strafeStartTime!!
+            
+            if (timeSinceStart < strafeDuration) {
+                // Still strafing - use motion vectors to drift toward center
+                val progress = timeSinceStart.toFloat() / strafeDuration
+                val easeProgress = progress * progress * (3f - 2f * progress) // Smooth hermite easing
+                
+                val currentX = player.posX
+                val currentZ = player.posZ
+                val targetX = strafeTarget!!.first
+                val targetZ = strafeTarget!!.second
+                
+                // Calculate drift needed
+                val driftX = (targetX - currentX) * easeProgress
+                val driftZ = (targetZ - currentZ) * easeProgress
+                
+                // Apply drift through motion vectors to respect physics
+                // Each tick applies a fraction of remaining drift
+                val remainingDriftX = driftX - (targetX - currentX) * (progress * progress * (3f - 2f * progress))
+                val remainingDriftZ = driftZ - (targetZ - currentZ) * (progress * progress * (3f - 2f * progress))
+                
+                // Add drift as motion adjustment (max 0.02 per tick to stay extremely tight and prevent block shifting)
+                val maxDrift = 0.02
+                player.motionX = (player.motionX * 0.9) + remainingDriftX.coerceIn(-maxDrift, maxDrift) * 0.1
+                player.motionZ = (player.motionZ * 0.9) + remainingDriftZ.coerceIn(-maxDrift, maxDrift) * 0.1
+            } else {
+                // Strafing complete
+                strafeTarget = null
+                strafeStartTime = null
+            }
+        }
+
         // Track progress
         val currentPos = BlockPos(player.posX, player.posY - 1, player.posZ)
         if (lastProgressPos == null) {
@@ -182,36 +265,20 @@ object EagleBridge {
         // Check if we're stuck (no new blocks placed)
         if (currentPos == lastProgressPos) {
             stuckTicks++
-            if (stuckTicks % 20 == 0) { // Log every second
-                ChatUtils.info("§e[EagleBridge] No progress for ${stuckTicks/20} seconds...")
-            }
             if (stuckTicks > 60) { // 3 seconds
-                ChatUtils.info("§c[EagleBridge] Stuck for 3 seconds - stopping")
-                // Try to find why we're stuck
-                val holding = player.inventory.getCurrentItem()
-                if (holding == null) {
-                    ChatUtils.info("§c[EagleBridge] Stuck: No item in hand")
-                } else if (holding.item !is ItemBlock) {
-                    ChatUtils.info("§c[EagleBridge] Stuck: Not holding blocks (${holding.item.javaClass.simpleName})")
-                } else {
-                    ChatUtils.info("§c[EagleBridge] Stuck: Block placement failing")
-                }
                 stopBridging()
                 return
             }
         } else {
-            if (stuckTicks > 0) {
-                ChatUtils.info("§a[EagleBridge] Progress resumed")
-            }
             stuckTicks = 0
             lastProgressPos = currentPos
         }
 
         // Control movement based on edge detection
         if (!canMoveSafely()) {
-            // Back up slowly when near edge
-            player.motionX = MathHelper.sin(player.rotationYaw * 0.017453292F) * 0.1
-            player.motionZ = -MathHelper.cos(player.rotationYaw * 0.017453292F) * 0.1
+            // Back up slowly when near edge - use vanilla-like sneaking speed (0.03 instead of 0.1)
+            player.motionX = MathHelper.sin(player.rotationYaw * 0.017453292F) * 0.03
+            player.motionZ = -MathHelper.cos(player.rotationYaw * 0.017453292F) * 0.03
             
             // First ensure we're in position to place
             if (shouldPlaceBlock()) {
@@ -223,7 +290,7 @@ object EagleBridge {
                 // Wait 50ms after conditions become true before starting to place (delay)
                 val timeSinceReady = currentTime - readyToPlaceStartTime!!
                 if (timeSinceReady >= 50) {
-                    // Reduced placement rate: Try every 50ms (every tick)
+                    // Placement rate: Try every 50ms (every tick)
                     if (currentTime - lastPlaceTime >= 50) {
                         // Don't start new rotation if we're already rotating
                         if (!isRotating) {
@@ -240,7 +307,6 @@ object EagleBridge {
                             val placed = tryPlaceBlockBehind(player, world, placePos)
                             if (placed) {
                                 lastPlaceTime = currentTime
-                                // Block counting will be verified after placement
                             }
                         }
                     }
@@ -270,14 +336,15 @@ object EagleBridge {
     fun shouldSneak(): Boolean {
         val player = BedwarsAFK.mc.thePlayer ?: return false
         
+        // CRITICAL: Always sneak while actively bridging (even if momentarily airborne)
+        // This is essential for eagle bridging to work across the void
+        if (isBridging) return true
+        
         // Check if holding blocks
         if (!isHoldingBlock()) return false
         
         // Must be on ground
         if (!player.onGround) return false
-        
-        // Always sneak when bridging
-        if (isBridging) return true
         
         // Pitch check: looking down (>69 degrees)
         if (player.rotationPitch < 69.0f) return false
@@ -287,22 +354,30 @@ object EagleBridge {
 
     /**
      * Check if we should place a block
+     * Returns true when at edge and ready to place, false otherwise
      */
     private fun shouldPlaceBlock(): Boolean {
         val player = BedwarsAFK.mc.thePlayer ?: return false
+        val world = BedwarsAFK.mc.theWorld ?: return false
         
         // Must be holding blocks
         if (!isHoldingBlock()) {
             return false
         }
         
-        // Must be sneaking (for eagle bridging)
+        // Must be sneaking
         if (!player.isSneaking) {
             return false
         }
         
         // Must be looking down enough (relaxed check - allow placement even if not perfectly on ground)
         if (player.rotationPitch < 60.0f) {
+            return false
+        }
+        
+        // CRITICAL: Only return true if we're actually at the edge (canMoveSafely = false)
+        // This ensures blocks are only placed when needed
+        if (canMoveSafely()) {
             return false
         }
         
@@ -444,6 +519,36 @@ object EagleBridge {
         
         // Return true since we attempted placement (success will be verified later)
         return true
+    }
+
+    /**
+     * Check if bridge can be activated at the next waypoint
+     * Used by AdvancedPathfinder to determine bridge necessity
+     */
+    fun canActivateBridge(): Boolean {
+        val player = BedwarsAFK.mc.thePlayer ?: return false
+        val world = BedwarsAFK.mc.theWorld ?: return false
+        
+        // Check if there's void below within 5 blocks
+        for (i in 0..5) {
+            val below = BlockPos(player.posX.toInt(), (player.posY - i).toInt() - 1, player.posZ.toInt())
+            val block = world.getBlockState(below).block
+            if (block != Blocks.air) {
+                // Found solid ground, don't need bridge
+                return false
+            }
+        }
+        // Void detected, bridge needed
+        return true
+    }
+    
+    /**
+     * Activate bridge mode
+     * Called when AdvancedPathfinder detects void and needs bridging
+     * Note: AdvancedPathfinder maintains the primary bridge mode state
+     */
+    fun activateBridge() {
+        startBridging()
     }
 
     /**
