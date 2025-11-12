@@ -66,7 +66,11 @@ object AdvancedPathfinder {
     private var bridgeSafetyNodesRemaining = 0 // Counter for +2 safety nodes after bridge section
     private var bridgeModeEnterTime = 0L // Track when bridge mode was activated
     private var bridgeValidationStartTime = 0L // Track when bridge completion validation started
+    private var lastVoidWaypointLogged = -1 // Track last waypoint that logged void message to reduce spam
     private val bridgeValidationDelayMs = 200 // Delay before checking if bridge is complete (ms)
+    private var cameraShakeOffset = 0.0 // Current camera shake offset for natural movement
+    private var lastDescentWaypointLogged = -1 // Track last waypoint that logged descent message to reduce spam
+    private var stuckRecoveryStartY = 0.0 // Track Y position when stuck recovery begins
     
     // Speedbridge tracking (for straight bridges only)
     private var speedbridgeCycle = 0 // 0 = sneak, 1 = unsneak
@@ -80,6 +84,16 @@ object AdvancedPathfinder {
     var denseVerticalWaypoints = true // Add intermediate nodes when climbing
     var sprintJumpMinDistance = 3 // Minimum horizontal distance to allow sprint jumping on Y changes
     var enableSpeedBridging = true // Safe speedbridge on straight bridges
+    
+    /**
+     * Generate subtle camera shake for realistic movement
+     */
+    private fun applyCameraShake(shakeIntensity: Float = 0.02f): Float {
+        // Use a simple oscillating function based on current time for consistent shake
+        val timeMs = System.currentTimeMillis()
+        val shakePattern = Math.sin((timeMs % 1000) / 1000.0 * Math.PI * 4) // Oscillate 4 times per second
+        return (shakePattern * shakeIntensity).toFloat()
+    }
     
     /**
      * Count blocks in hotbar to detect placements
@@ -1007,7 +1021,46 @@ object AdvancedPathfinder {
                         val transitionElapsed = System.currentTimeMillis() - bridgeExitTime
                         if (transitionElapsed < 500) {
                             // Still in 500ms pause - stay completely still (no sneaking)
+                            // During this phase, check for platforms or safe drop zones for exit actions
                             Movement.clearAll()
+                            
+                            // Check for platform below
+                            val platformCheckPos1 = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
+                            val platformCheckPos2 = BlockPos(player.posX.toInt(), player.posY.toInt() - 2, player.posZ.toInt())
+                            val platformBlock1 = world.getBlockState(platformCheckPos1).block
+                            val platformBlock2 = world.getBlockState(platformCheckPos2).block
+                            
+                            val foundPlatformBelow = (platformBlock1.material.isSolid || platformBlock2.material.isSolid)
+                            
+                            if (foundPlatformBelow) {
+                                if (debugMode) ChatUtils.info("§2[Exit Action] §7Platform detected below during transition")
+                                // Platform waypoint would be inserted here if needed
+                            } else {
+                                // No platform - check for safe drop zone
+                                var canDropSafely = false
+                                var safeDropDistance = 0
+                                for (dropDistance in 1..4) {
+                                    val checkPos = BlockPos(player.posX.toInt(), player.posY.toInt() - dropDistance, player.posZ.toInt())
+                                    val checkBlock = world.getBlockState(checkPos).block
+                                    val checkBlockBelow = world.getBlockState(checkPos.down()).block
+                                    
+                                    // Found solid ground within 1 block below
+                                    if (checkBlockBelow.material.isSolid && checkBlock == Blocks.air) {
+                                        canDropSafely = true
+                                        safeDropDistance = dropDistance
+                                        break
+                                    }
+                                }
+                                
+                                if (debugMode) {
+                                    if (canDropSafely) {
+                                        ChatUtils.info("§2[Exit Action] §7Safe drop found at ${safeDropDistance} block(s) below")
+                                    } else {
+                                        ChatUtils.info("§e[Exit Action] ⚠ §7No safe drop zone found within 4 blocks")
+                                    }
+                                }
+                            }
+                            
                             return
                         } else {
                             // Pause complete - unshift and start waiting for rotation
@@ -1033,9 +1086,9 @@ object AdvancedPathfinder {
                         
                         // Don't move until facing target (within 10 degrees)
                         if (Math.abs(yawDiff) > 10f) {
-                            // Still rotating - actively rotate faster (90% per tick)
+                            // Still rotating - use smooth interpolation (20% per tick, same as normal movement)
                             Movement.clearAll()
-                            player.rotationYaw = currentYaw + (yawDiff * 0.9f)
+                            player.rotationYaw = currentYaw + (yawDiff * 0.2f)
                             if (debugMode) ChatUtils.info("§6[Pathfinder] §7Rotating... ${yawDiff.toInt()}° remaining")
                             return
                         }
@@ -1049,6 +1102,289 @@ object AdvancedPathfinder {
                     val currentPlayerPos = BlockPos(player.posX, player.posY, player.posZ)
                     if (lastPlayerPos != null && lastPlayerPos == currentPlayerPos) {
                         stuckCounter++
+                        
+                        // If stuck during bridging, attempt to recover with position-based strafing
+                        if (bridgeModeActive && stuckCounter > 20) { // Stuck for 1 second
+                            if (debugMode && stuckCounter == 21) {
+                                ChatUtils.info("§6[Pathfinder] §7Stuck during bridge - attempting recovery")
+                                stuckRecoveryStartY = player.posY // Record Y position when recovery starts
+                            }
+                            
+                            // Check if player has risen (successful backward jump detected)
+                            if (player.posY > stuckRecoveryStartY + 0.1 && stuckCounter < 50) {
+                                if (debugMode) {
+                                    ChatUtils.info("§a[JUMP SUCCESS] §7Successful backward jump detected (Y change: ${String.format("%.2f", player.posY - stuckRecoveryStartY)}) - exiting bridge mode and checking for platforms")
+                                }
+                                Movement.clearAll()
+                                EagleBridge.stopBridging()
+                                bridgeModeActive = false
+                                isTransitioningFromBridge = true
+                                bridgeExitTime = System.currentTimeMillis()
+                                stuckCounter = 0
+                                return
+                            }
+                            
+                            // First, check if there's a safe block BEHIND the player (in the direction of travel)
+                            // Since we bridge backward, we need to check blocks in the direction we're traveling toward
+                            val currentNode = path[currentPathIndex]
+                            val travelDirX = if (currentPathIndex + 1 < path.size) {
+                                val nextNode = path[currentPathIndex + 1]
+                                nextNode.pos.x - currentNode.pos.x
+                            } else {
+                                0
+                            }
+                            val travelDirZ = if (currentPathIndex + 1 < path.size) {
+                                val nextNode = path[currentPathIndex + 1]
+                                nextNode.pos.z - currentNode.pos.z
+                            } else {
+                                0
+                            }
+                            
+                            // Normalize travel direction
+                            val travelDist = Math.sqrt((travelDirX * travelDirX + travelDirZ * travelDirZ).toDouble())
+                            val normalizedTravelX = if (travelDist > 0) (travelDirX / travelDist).toInt() else 0
+                            val normalizedTravelZ = if (travelDist > 0) (travelDirZ / travelDist).toInt() else 0
+                            
+                            val behindBlockPos = BlockPos(
+                                player.posX.toInt() + normalizedTravelX,
+                                player.posY.toInt() - 1,
+                                player.posZ.toInt() + normalizedTravelZ
+                            )
+                            val behindBlock = world.getBlockState(behindBlockPos).block
+                            
+                            if (debugMode && stuckCounter == 21) {
+                                ChatUtils.info("§6[Stuck Debug] §7Behind block check: ${behindBlock.getLocalizedName()} at (${behindBlockPos.x}, ${behindBlockPos.y}, ${behindBlockPos.z}) | TravelDir: (${normalizedTravelX},${normalizedTravelZ}) | OnGround: ${player.onGround} | InWater: ${player.isInWater}")
+                            }
+                            
+                            // If there's a solid block behind and player is not falling, try to jump back
+                            if (behindBlock != Blocks.air && !player.isInWater && player.onGround) {
+                                if (debugMode && stuckCounter == 21) {
+                                    ChatUtils.info("§a[FIRST RECOVERY] §7Found solid block ahead in travel direction at (${behindBlockPos.x}, ${behindBlockPos.y}, ${behindBlockPos.z}) - jumping backwards while bridging")
+                                }
+                                Movement.jump()
+                                // Stay in bridge mode - continue backward movement (S key)
+                                Movement.stopForward()
+                                Movement.startBackward()
+                                return
+                            } else if (behindBlock != Blocks.air && stuckCounter > 50) {
+                                // Keep trying to jump backward if stuck for extended period
+                                if (stuckCounter == 51) {
+                                    ChatUtils.info("§b[PERSISTENT RETRY] §7Solid block ahead in travel direction still present after ${stuckCounter} ticks - retrying jump every 10 ticks (staying in bridge mode)")
+                                }
+                                if (stuckCounter % 10 == 0) {
+                                    if (debugMode) {
+                                        ChatUtils.info("§b[PERSISTENT RETRY] §7Retry attempt at tick $stuckCounter")
+                                    }
+                                    Movement.jump()
+                                }
+                                // Stay in bridge mode - continue backward movement (S key)
+                                Movement.stopForward()
+                                Movement.startBackward()
+                                return
+                            }
+                            
+                            // If no block behind or jumping failed, use strafe recovery
+                            if (debugMode && stuckCounter == 21 && (behindBlock == Blocks.air || player.isInWater || !player.onGround)) {
+                                ChatUtils.info("§c[FALLBACK RECOVERY] §7No safe block behind (or conditions not met) - using waypoint-based strafing")
+                            }
+                            
+                            // CHECK: Before strafing, see if there's a platform below we can drop to
+                            val blockUnderPos = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
+                            var foundPlatformBelow = false
+                            var platformY = blockUnderPos.y
+                            var platformX = blockUnderPos.x
+                            var platformZ = blockUnderPos.z
+                            
+                            for (dropDist in 1..2) {
+                                val platformCheckY = blockUnderPos.y - dropDist
+                                
+                                // Check if this level has any solid block in 3x3 area around player's position
+                                var hasSolidPlatformBlock = false
+                                var platformCheckPos = BlockPos.ORIGIN
+                                
+                                for (dx in -1..1) {
+                                    for (dz in -1..1) {
+                                        val checkX = blockUnderPos.x + dx
+                                        val checkZ = blockUnderPos.z + dz
+                                        val checkPos = BlockPos(checkX, platformCheckY, checkZ)
+                                        val blockAtPos = world.getBlockState(checkPos).block
+                                        val blockBelow = world.getBlockState(checkPos.down()).block
+                                        
+                                        // Found a solid block with solid ground beneath it
+                                        if (blockAtPos != Blocks.air && blockBelow.material.isSolid) {
+                                            hasSolidPlatformBlock = true
+                                            platformCheckPos = checkPos
+                                            break
+                                        }
+                                    }
+                                    if (hasSolidPlatformBlock) break
+                                }
+                                
+                                if (hasSolidPlatformBlock) {
+                                    // Verify there's a clear 3x3 path from current position to platform
+                                    var isPathClear = true
+                                    for (intermediateY in blockUnderPos.y - 1 until platformCheckY) {
+                                        for (dx in -1..1) {
+                                            for (dz in -1..1) {
+                                                val checkX = blockUnderPos.x + dx
+                                                val checkZ = blockUnderPos.z + dz
+                                                val blockCheck = world.getBlockState(BlockPos(checkX, intermediateY, checkZ)).block
+                                                if (blockCheck != Blocks.air) {
+                                                    isPathClear = false
+                                                    break
+                                                }
+                                            }
+                                            if (!isPathClear) break
+                                        }
+                                        if (!isPathClear) break
+                                    }
+                                    
+                                    if (isPathClear) {
+                                        foundPlatformBelow = true
+                                        platformY = platformCheckY
+                                        platformX = platformCheckPos.x
+                                        platformZ = platformCheckPos.z
+                                        if (debugMode && stuckCounter == 21) {
+                                            ChatUtils.info("§6[Stuck Recovery] §7Found safe platform below at (${platformX}, ${platformY}, ${platformZ}) - exiting bridge mode")
+                                        }
+                                        break
+                                    }
+                                }
+                            }
+                            
+                            // If platform found below, exit bridge mode to take it
+                            if (foundPlatformBelow) {
+                                Movement.clearAll()
+                                EagleBridge.stopBridging()
+                                bridgeModeActive = false
+                                stuckCounter = 0 // Reset stuck counter
+                                if (debugMode) ChatUtils.info("§a[Stuck Recovery] §7Exiting bridge mode to land on platform")
+                                return
+                            }
+                            
+                            // Create a strafe target waypoint 1 block ahead in direction of next waypoint
+                            var strafeTargetX = currentNode.pos.x.toDouble()
+                            var strafeTargetY = currentNode.pos.y.toDouble()
+                            var strafeTargetZ = currentNode.pos.z.toDouble()
+                            
+                            // If there's a next waypoint, calculate direction to it (including elevation)
+                            if (currentPathIndex + 1 < path.size) {
+                                val nextNode = path[currentPathIndex + 1]
+                                val dirX = nextNode.pos.x - currentNode.pos.x
+                                val dirY = nextNode.pos.y - currentNode.pos.y
+                                val dirZ = nextNode.pos.z - currentNode.pos.z
+                                val distance = Math.sqrt((dirX * dirX + dirY * dirY + dirZ * dirZ).toDouble())
+                                
+                                if (distance > 0) {
+                                    // Normalize and move 1 block in that direction (including elevation)
+                                    val normX = dirX / distance
+                                    val normY = dirY / distance
+                                    val normZ = dirZ / distance
+                                    strafeTargetX = currentNode.pos.x + normX
+                                    strafeTargetY = currentNode.pos.y + normY
+                                    strafeTargetZ = currentNode.pos.z + normZ
+                                }
+                            }
+                            
+                            // Calculate strafe target center (0.5, 0.5)
+                            val strafeTargetCenterX = strafeTargetX + 0.5
+                            val strafeTargetCenterZ = strafeTargetZ + 0.5
+                            
+                            // Check player offset from strafe target center
+                            val offsetX = player.posX - strafeTargetCenterX
+                            val offsetZ = player.posZ - strafeTargetCenterZ
+                            val distanceFromTarget = Math.sqrt(offsetX * offsetX + offsetZ * offsetZ)
+                            
+                            // Get player facing direction for strafe calculation
+                            val playerYaw = Math.toRadians(player.rotationYaw.toDouble())
+                            
+                            // If more than 0.3 blocks off-target, strafe toward it
+                            if (distanceFromTarget > 0.3) {
+                                // Determine strafe direction based on player's facing
+                                val facingX = Math.cos(playerYaw)
+                                val facingZ = Math.sin(playerYaw)
+                                
+                                // Cross product tells us left/right relative to facing
+                                val crossProduct = (offsetX * facingZ - offsetZ * facingX)
+                                
+                                if (crossProduct > 0.1) {
+                                    // Player is to the right - strafe left toward target
+                                    if (debugMode && stuckCounter % 10 == 0) {
+                                        ChatUtils.info("§c[FALLBACK RECOVERY] §7Strafing LEFT toward target (offset=${String.format("%.2f", distanceFromTarget)})")
+                                    }
+                                    Movement.startLeft()
+                                    Movement.stopRight()
+                                } else if (crossProduct < -0.1) {
+                                    // Player is to the left - strafe right toward target
+                                    if (debugMode && stuckCounter % 10 == 0) {
+                                        ChatUtils.info("§c[FALLBACK RECOVERY] §7Strafing RIGHT toward target (offset=${String.format("%.2f", distanceFromTarget)})")
+                                    }
+                                    Movement.stopLeft()
+                                    Movement.startRight()
+                                } else {
+                                    // Nearly centered on target
+                                    if (debugMode && stuckCounter % 10 == 0) {
+                                        ChatUtils.info("§c[FALLBACK RECOVERY] §7Player centered on target")
+                                    }
+                                    Movement.stopLeft()
+                                    Movement.stopRight()
+                                }
+                                
+                                // Adjust camera pitch to aim at the block's center or edge
+                                // When player is off-center, aim at the edge between block faces instead of down into void
+                                
+                                // Calculate player position relative to block center
+                                val blockCenterX = strafeTargetX + 0.5
+                                val blockCenterZ = strafeTargetZ + 0.5
+                                val playerOffsetX = player.posX - blockCenterX
+                                val playerOffsetZ = player.posZ - blockCenterZ
+                                
+                                // Determine which edge to aim at based on player position
+                                val targetAimX = blockCenterX + (if (Math.abs(playerOffsetX) > 0.3) Math.signum(playerOffsetX.toFloat()) * 0.45 else 0.0)
+                                val targetAimZ = blockCenterZ + (if (Math.abs(playerOffsetZ) > 0.3) Math.signum(playerOffsetZ.toFloat()) * 0.45 else 0.0)
+                                
+                                val playerEyeY = player.posY + 1.62 // Player eye height
+                                val targetCenterY = strafeTargetY + 0.5 // Center of block
+                                val yDifference = targetCenterY - playerEyeY
+                                
+                                // Calculate distance to the aim point (edge or center)
+                                val aimOffsetX = targetAimX - player.posX
+                                val aimOffsetZ = targetAimZ - player.posZ
+                                val horizontalDist = Math.sqrt(aimOffsetX * aimOffsetX + aimOffsetZ * aimOffsetZ)
+                                
+                                // Smoothly adjust YAW to face the aim point
+                                val targetYaw = Math.toDegrees(Math.atan2(aimOffsetZ, aimOffsetX)).toFloat() - 90f // Adjust for Minecraft yaw offset
+                                var yawDifference = targetYaw - player.rotationYaw
+                                
+                                // Normalize yaw difference to shortest rotation (-180 to 180)
+                                while (yawDifference > 180f) yawDifference -= 360f
+                                while (yawDifference < -180f) yawDifference += 360f
+                                
+                                // Smoothly adjust yaw toward target with subtle camera shake
+                                player.rotationYaw += yawDifference * 0.35f + applyCameraShake(0.03f)
+                                
+                                // Convert vertical difference to pitch angle to aim at the edge/center
+                                val targetPitch = -Math.toDegrees(Math.atan(yDifference / horizontalDist)).toFloat()
+                                
+                                // Smoothly adjust pitch toward target with subtle camera shake
+                                val pitchDifference = targetPitch - player.rotationPitch
+                                player.rotationPitch += pitchDifference * 0.35f + applyCameraShake(0.03f)
+                                
+                                // Clamp pitch to valid range
+                                if (player.rotationPitch > 90f) player.rotationPitch = 90f
+                                if (player.rotationPitch < -90f) player.rotationPitch = -90f
+                            } else {
+                                // Player is centered on strafe target - stop strafing
+                                if (debugMode) {
+                                    ChatUtils.info("§a[FALLBACK RECOVERY] §7Successfully recentered player, exiting strafe mode")
+                                }
+                                Movement.stopLeft()
+                                Movement.stopRight()
+                            }
+                            
+                            return
+                        }
+                        
                         if (stuckCounter > 60) { // Stuck for 3 seconds
                             if (debugMode) ChatUtils.error("§c[Pathfinder] §7Stuck detected! Adding intermediate waypoints")
                             
@@ -1143,6 +1479,56 @@ object AdvancedPathfinder {
                     // Use stricter threshold during bridging since we need precise placement
                     val distanceThreshold = if (bridgeModeActive) 0.3 else 0.8
                     
+                    // SPECIAL CASE: If bridging and target waypoint is below current position, check if we can reach it via platform
+                    val reachedViaDownwardPlatform = if (bridgeModeActive && diffY < -0.5 && horizontalDistance < 2.0) {
+                        // Waypoint is below us - check if platform detection finds it
+                        val blockUnderPos = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
+                        var foundDownwardPlatform = false
+                        
+                        // Check if target waypoint is on a platform we can reach (up to 2 blocks down)
+                        for (dropDist in 1..2) {
+                            val platformCheckY = blockUnderPos.y - dropDist
+                            
+                            if (platformCheckY == target.y) {
+                                // Found the target waypoint Y level - verify it's a solid platform
+                                val targetPos = BlockPos(target.x, target.y, target.z)
+                                val targetBlock = world.getBlockState(targetPos).block
+                                val targetBlockBelow = world.getBlockState(targetPos.down()).block
+                                
+                                if (targetBlock != Blocks.air && targetBlockBelow.material.isSolid) {
+                                    // Target is a solid platform - check if there's a clear path to it
+                                    var isPathClear = true
+                                    for (intermediateY in blockUnderPos.y - 1 until platformCheckY) {
+                                        for (dx in -1..1) {
+                                            for (dz in -1..1) {
+                                                val checkX = blockUnderPos.x + dx
+                                                val checkZ = blockUnderPos.z + dz
+                                                val blockCheck = world.getBlockState(BlockPos(checkX, intermediateY, checkZ)).block
+                                                if (blockCheck != Blocks.air) {
+                                                    isPathClear = false
+                                                    break
+                                                }
+                                            }
+                                            if (!isPathClear) break
+                                        }
+                                        if (!isPathClear) break
+                                    }
+                                    
+                                    if (isPathClear) {
+                                        foundDownwardPlatform = true
+                                        if (debugMode) {
+                                            ChatUtils.info("§6[Downward Bridge] §7Can reach waypoint below via platform at (${target.x}, ${target.y}, ${target.z})")
+                                        }
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        foundDownwardPlatform
+                    } else {
+                        false
+                    }
+                    
                     // For MANDATORY nodes (tight elevation areas), require EXACT foot placement
                     val reachedWaypoint = if (currentNode.isMandatory) {
                         // Mandatory: player's feet must be ON this exact block
@@ -1151,7 +1537,7 @@ object AdvancedPathfinder {
                         playerFeetBlockPos.z == target.z && 
                         abs(player.posY - (target.y + 1.0)) < 0.3 // Within 0.3 blocks of standing height
                     } else {
-                        // Normal nodes: accept either feet or head contact
+                        // Normal nodes: accept either feet or head contact, OR downward platform reach while bridging
                         val feetReached = horizontalDistance < distanceThreshold && abs(diffY) < 1.5
                         
                         val playerHeadY = player.posY + 1.8 // Player eye height
@@ -1160,16 +1546,24 @@ object AdvancedPathfinder {
                         val headReached = horizontalDistance < distanceThreshold && 
                                           playerHeadY >= nodeBlockMinY && playerHeadY <= nodeBlockMaxY
                         
-                        feetReached || headReached
+                        feetReached || headReached || reachedViaDownwardPlatform
                     }
                     
                     if (reachedWaypoint) {
                         // Critical: If in bridge mode, check if we're still over void
                         // If so, DON'T exit bridge mode yet - continue bridging until solid ground
                         if (bridgeModeActive && hasVoidBelow(player, world)) {
-                            if (debugMode) ChatUtils.info("§6[Pathfinder] §7Reached waypoint but still over void - continuing bridge")
+                            if (debugMode && lastVoidWaypointLogged != currentPathIndex) {
+                                ChatUtils.info("§6[Pathfinder] §7Reached waypoint but still over void - continuing bridge")
+                                lastVoidWaypointLogged = currentPathIndex
+                            }
                             // Don't advance waypoint, stay in place and keep bridging
                             return
+                        }
+                        
+                        // Reset void logging flag when we're no longer over void
+                        if (!bridgeModeActive || !hasVoidBelow(player, world)) {
+                            lastVoidWaypointLogged = -1
                         }
                         
                         // Check if in bridge mode at any waypoint to evaluate exit conditions
@@ -1192,33 +1586,35 @@ object AdvancedPathfinder {
                             
                             // Only perform validation checks after delay has passed
                             if (delayPassed) {
-                                // Get blocks around player position
-                                val blockBelowPos = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
-                                val blockBelow = world.getBlockState(blockBelowPos).block
+                                // Get the block directly under the player
+                                val blockUnderPos = BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt())
+                                val blockUnder = world.getBlockState(blockUnderPos).block
                                 
-                                // Calculate behind positions based on player's yaw
+                                // Calculate ahead positions in direction of travel
+                                // Minecraft yaw: 0° = +X(E), 90° = -Z(N), ±180° = -X(W), -90° = +Z(S)
+                                // Player bridges backward (S key), so ahead = opposite direction of yaw
                                 val yaw = player.rotationYaw
-                                val behindPos1 = when {
-                                    yaw in -45f..45f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() - 1)
-                                    yaw in 45f..135f -> BlockPos(player.posX.toInt() - 1, player.posY.toInt() - 1, player.posZ.toInt())
-                                    yaw in 135f..180f || yaw in -180f..-135f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() + 1)
-                                    else -> BlockPos(player.posX.toInt() + 1, player.posY.toInt() - 1, player.posZ.toInt())
+                                val aheadBlockPos1 = when {
+                                    yaw in -45f..45f -> BlockPos(blockUnderPos.x - 1, blockUnderPos.y, blockUnderPos.z)      // Yaw ~0° (facing E), bridge backward = -X
+                                    yaw in 45f..135f -> BlockPos(blockUnderPos.x, blockUnderPos.y, blockUnderPos.z + 1)      // Yaw ~90° (facing N), bridge backward = +Z
+                                    yaw in 135f..180f || yaw in -180f..-135f -> BlockPos(blockUnderPos.x + 1, blockUnderPos.y, blockUnderPos.z)  // Yaw ~180° (facing W), bridge backward = +X
+                                    else -> BlockPos(blockUnderPos.x, blockUnderPos.y, blockUnderPos.z - 1)                  // Yaw ~-90° (facing S), bridge backward = -Z
                                 }
                                 
-                                val behindPos2 = when {
-                                    yaw in -45f..45f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() - 2)
-                                    yaw in 45f..135f -> BlockPos(player.posX.toInt() - 2, player.posY.toInt() - 1, player.posZ.toInt())
-                                    yaw in 135f..180f || yaw in -180f..-135f -> BlockPos(player.posX.toInt(), player.posY.toInt() - 1, player.posZ.toInt() + 2)
-                                    else -> BlockPos(player.posX.toInt() + 2, player.posY.toInt() - 1, player.posZ.toInt())
+                                val aheadBlockPos2 = when {
+                                    yaw in -45f..45f -> BlockPos(blockUnderPos.x - 2, blockUnderPos.y, blockUnderPos.z)      // Yaw ~0° (facing E), bridge backward = -X
+                                    yaw in 45f..135f -> BlockPos(blockUnderPos.x, blockUnderPos.y, blockUnderPos.z + 2)      // Yaw ~90° (facing N), bridge backward = +Z
+                                    yaw in 135f..180f || yaw in -180f..-135f -> BlockPos(blockUnderPos.x + 2, blockUnderPos.y, blockUnderPos.z)  // Yaw ~180° (facing W), bridge backward = +X
+                                    else -> BlockPos(blockUnderPos.x, blockUnderPos.y, blockUnderPos.z - 2)                  // Yaw ~-90° (facing S), bridge backward = -Z
                                 }
                                 
-                                val blockBehind1 = world.getBlockState(behindPos1).block
-                                val blockBehind2 = world.getBlockState(behindPos2).block
+                                val blockAhead1 = world.getBlockState(aheadBlockPos1).block
+                                val blockAhead2 = world.getBlockState(aheadBlockPos2).block
                                 
-                                // PRIMARY CHECK: Bridge completion (solid below + solid behind)
-                                val hasSolidBelow = blockBelow != Blocks.air
-                                val hasSolidBehind = blockBehind1 != Blocks.air || blockBehind2 != Blocks.air
-                                val isBridgeComplete = hasSolidBelow && hasSolidBehind
+                                // PRIMARY CHECK: Bridge completion (solid under player + BOTH solid blocks ahead)
+                                val hasSolidUnder = blockUnder != Blocks.air
+                                val hasSolidAhead = blockAhead1 != Blocks.air && blockAhead2 != Blocks.air
+                                val isBridgeComplete = hasSolidUnder && hasSolidAhead
                                 
                                 // SECONDARY CHECK: Not still falling (safety net)
                                 val isPlayerFalling = player.motionY < -0.5
@@ -1226,19 +1622,95 @@ object AdvancedPathfinder {
                                 // TERTIARY CHECK: Player is on ground or stable
                                 val isPlayerStable = player.onGround
                                 
-                                // DIAGNOSTIC: Log all checks if debug mode enabled
-                                if (debugMode) {
-                                    ChatUtils.info("§6[Bridge Check @ WP] Below: ${blockBelow.getLocalizedName()} | " +
-                                        "Behind1: ${blockBehind1.getLocalizedName()} | " +
-                                        "Behind2: ${blockBehind2.getLocalizedName()} | " +
-                                        "Falling: $isPlayerFalling | Stable: $isPlayerStable | Complete: $isBridgeComplete")
+                                // PLATFORM CHECK: Look for safe platforms up to 2 blocks below
+                                // Must ensure there's a clear 3x3 path from current position to platform
+                                var foundPlatform = false
+                                var platformY = blockUnderPos.y
+                                var platformX = blockUnderPos.x
+                                var platformZ = blockUnderPos.z
+                                
+                                for (dropDist in 1..2) {
+                                    val platformCheckY = blockUnderPos.y - dropDist
+                                    
+                                    // Check if this level has any solid block in 3x3 area around player's position
+                                    var hasSolidPlatformBlock = false
+                                    var platformCheckPos = BlockPos.ORIGIN // Will be set if found
+                                    
+                                    for (dx in -1..1) {
+                                        for (dz in -1..1) {
+                                            val checkX = blockUnderPos.x + dx
+                                            val checkZ = blockUnderPos.z + dz
+                                            val checkPos = BlockPos(checkX, platformCheckY, checkZ)
+                                            val blockAtPos = world.getBlockState(checkPos).block
+                                            val blockBelow = world.getBlockState(checkPos.down()).block
+                                            
+                                            // Found a solid block with solid ground beneath it
+                                            if (blockAtPos != Blocks.air && blockBelow.material.isSolid) {
+                                                hasSolidPlatformBlock = true
+                                                platformCheckPos = checkPos
+                                                break
+                                            }
+                                        }
+                                        if (hasSolidPlatformBlock) break
+                                    }
+                                    
+                                    if (hasSolidPlatformBlock) {
+                                        // Verify there's a clear 3x3 path from current position to platform
+                                        var isPathClear = true
+                                        for (intermediateY in blockUnderPos.y - 1 until platformCheckY) {
+                                            // Check 3x3 area at this intermediate level
+                                            for (dx in -1..1) {
+                                                for (dz in -1..1) {
+                                                    val checkX = blockUnderPos.x + dx
+                                                    val checkZ = blockUnderPos.z + dz
+                                                    val blockCheck = world.getBlockState(BlockPos(checkX, intermediateY, checkZ)).block
+                                                    if (blockCheck != Blocks.air) {
+                                                        isPathClear = false
+                                                        break
+                                                    }
+                                                }
+                                                if (!isPathClear) break
+                                            }
+                                            if (!isPathClear) break
+                                        }
+                                        
+                                        if (isPathClear) {
+                                            foundPlatform = true
+                                            platformY = platformCheckY
+                                            platformX = platformCheckPos.x
+                                            platformZ = platformCheckPos.z
+                                            if (debugMode) {
+                                                ChatUtils.info("§6[Platform Detection] §7Found platform at (${platformX}, ${platformY}, ${platformZ}) with clear 3x3 path")
+                                            }
+                                            break
+                                        }
+                                    }
                                 }
                                 
-                                // FINAL DECISION: Exit only if all critical checks pass
-                                if (isBridgeComplete && !isPlayerFalling && isPlayerStable) {
-                                    // Bridge is fully connected AND player is safe - exit bridge mode
+                                // DIAGNOSTIC: Log all checks if debug mode enabled
+                                if (debugMode) {
+                                    ChatUtils.info("§6[Bridge Check @ WP] Under(${blockUnderPos.x},${blockUnderPos.y},${blockUnderPos.z}): ${blockUnder.getLocalizedName()} | " +
+                                        "Ahead1(${aheadBlockPos1.x},${aheadBlockPos1.z}): ${blockAhead1.getLocalizedName()} | " +
+                                        "Ahead2(${aheadBlockPos2.x},${aheadBlockPos2.z}): ${blockAhead2.getLocalizedName()} | " +
+                                        "Falling: $isPlayerFalling | Stable: $isPlayerStable | Complete: $isBridgeComplete | Platform: $foundPlatform")
+                                }
+                                
+                                // FINAL DECISION: Exit bridge mode validation
+                                // Check if next waypoint is under the bot
+                                var nextWaypointUnder = false
+                                if (currentPathIndex + 1 < path.size) {
+                                    val nextNode = path[currentPathIndex + 1]
+                                    val botY = player.posY.toInt()
+                                    if (nextNode.pos.y < botY) {
+                                        nextWaypointUnder = true
+                                        if (debugMode) ChatUtils.info("§e[Bridge Exit] §7Next waypoint is below bot at Y: ${nextNode.pos.y} (Bot Y: $botY)")
+                                    }
+                                }
+                                
+                                if ((isBridgeComplete && !isPlayerFalling && isPlayerStable) || nextWaypointUnder) {
+                                    // Bridge exit validation passed - either bridge complete OR next waypoint is below
                                     Movement.clearAll()
-                                    EagleBridge.stopBridging() // Directly stop, don't use deactivateBridge
+                                    EagleBridge.stopBridging()
                                     bridgeModeActive = false
                                     bridgeValidationStartTime = 0L // Reset delay timer
                                     isTransitioningFromBridge = true
@@ -1247,55 +1719,56 @@ object AdvancedPathfinder {
                                     
                                     if (debugMode) {
                                         val timeSinceBridgeStart = System.currentTimeMillis() - bridgeModeEnterTime
+                                        val reason = if (nextWaypointUnder) "next WP under" else "complete"
                                         ChatUtils.info("§a[Bridge Exit] §7Complete after ${timeSinceBridgeStart}ms at waypoint - " +
-                                            "Below: ✓ Behind: ✓ Stable: ✓ FallRate: ${player.motionY}")
-                                    }
-                                    
-                                    // CHECK: Can the bot safely drop down from this position?
-                                    // Look down up to 4 blocks to find safe landing
-                                    var canDropSafely = false
-                                    var safeDropDistance = 0
-                                    for (dropDistance in 1..4) {
-                                        val checkPos = BlockPos(player.posX.toInt(), player.posY.toInt() - dropDistance, player.posZ.toInt())
-                                        val checkBlock = world.getBlockState(checkPos).block
-                                        val checkBlockBelow = world.getBlockState(checkPos.down()).block
-                                        
-                                        // Found solid ground within 1 block below
-                                        if (checkBlockBelow.material.isSolid && checkBlock == Blocks.air) {
-                                            canDropSafely = true
-                                            safeDropDistance = dropDistance
-                                            break
-                                        }
-                                    }
-                                    
-                                    if (debugMode) {
-                                        if (canDropSafely) {
-                                            ChatUtils.info("§2[Drop Check] ✓ §7Safe drop found at ${safeDropDistance} block(s) below")
-                                        } else {
-                                            ChatUtils.info("§e[Drop Check] ⚠ §7No safe drop zone found within 4 blocks")
-                                        }
+                                            "Reason: $reason | FallRate: ${player.motionY}")
                                     }
                                 } else {
                                     // Bridge not fully complete OR player unstable - continue bridging
                                     if (debugMode) {
                                         val reason = when {
-                                            !hasSolidBelow -> "no solid below"
-                                            !hasSolidBehind -> "no solid behind"
+                                            !hasSolidUnder -> "no solid under"
+                                            !hasSolidAhead -> "no solid ahead"
                                             isPlayerFalling -> "player falling (motionY: ${player.motionY})"
                                             !isPlayerStable -> "player not on ground"
                                             else -> "unknown"
                                         }
                                         ChatUtils.info("§c[Bridge Continue] §7Reason: $reason at waypoint")
                                     }
+                                    
+                                    // Add intermediate waypoint 1-2 blocks ahead in direction of next waypoint
+                                    if (currentPathIndex + 1 < path.size) {
+                                        val currentNode = path[currentPathIndex]
+                                        val nextNode = path[currentPathIndex + 1]
+                                        
+                                        // Calculate direction to next waypoint
+                                        val dirX = nextNode.pos.x - currentNode.pos.x
+                                        val dirY = nextNode.pos.y - currentNode.pos.y
+                                        val dirZ = nextNode.pos.z - currentNode.pos.z
+                                        
+                                        // Normalize direction and add 1-2 blocks ahead
+                                        val distance = 2 // Add waypoint 2 blocks ahead
+                                        val newX = currentNode.pos.x + if (dirX > 0) distance else if (dirX < 0) -distance else 0
+                                        val newY = currentNode.pos.y + if (dirY > 0) distance else if (dirY < 0) -distance else 0
+                                        val newZ = currentNode.pos.z + if (dirZ > 0) distance else if (dirZ < 0) -distance else 0
+                                        val newPos = BlockPos(newX, newY, newZ)
+                                        
+                                        // Only insert if not already at this position
+                                        if (newPos != currentNode.pos && (currentPathIndex + 1 >= path.size || newPos != path[currentPathIndex + 1].pos)) {
+                                            val intermediateNode = Node(newPos, currentNode, 0.0, 0.0, true, currentNode.actionType)
+                                            path.add(currentPathIndex + 1, intermediateNode)
+                                        }
+                                    }
+                                    
                                     currentPathIndex++
                                     PathRenderer.setWaypointIndex(currentPathIndex)
+                                    lastDescentWaypointLogged = -1 // Reset descent logging flag for new waypoint
                                     // Continue bridging - stay in bridge mode and keep going
                                     return
                                 }
                             } else {
-                                // Delay not passed yet - continue to next waypoint to accumulate check time
-                                currentPathIndex++
-                                PathRenderer.setWaypointIndex(currentPathIndex)
+                                // Delay not passed yet - stay at current waypoint and wait for check time to accumulate
+                                // Don't advance waypoint, just return and continue waiting
                                 return
                             }
                         }
@@ -1303,6 +1776,7 @@ object AdvancedPathfinder {
                         if (debugMode) ChatUtils.info("§a✓ §7Waypoint §f${currentPathIndex + 1}")
                         currentPathIndex++
                         PathRenderer.setWaypointIndex(currentPathIndex)
+                        lastDescentWaypointLogged = -1 // Reset descent logging flag for new waypoint
                         
                         if (currentPathIndex >= path.size) {
                             if (debugMode) ChatUtils.info("§a[Pathfinder] §7Destination reached!")
@@ -1320,14 +1794,14 @@ object AdvancedPathfinder {
                     var targetYaw = Math.toDegrees(Math.atan2(diffZ, diffX)).toFloat() - 90f
                     var targetPitch = 0f
                     
+                    // Determine if this is a diagonal bridge based on movement direction
+                    val absDiffX = abs(diffX)
+                    val absDiffZ = abs(diffZ)
+                    val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5 && bridgeModeActive // Both X and Z movement, only when bridging
+                    
                     // If eagle bridging is ACTIVE (regardless of node type), use proper bridging angles
                     // This allows extending bridge mode past the last BRIDGE node if still over void
                     if (bridgeModeActive) {
-                        // Determine if this is a diagonal bridge based on movement direction
-                        val absDiffX = abs(diffX)
-                        val absDiffZ = abs(diffZ)
-                        val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5 // Both X and Z movement
-                        
                         if (isDiagonalBridge) {
                             // DIAGONAL BRIDGE: Use fixed angles based on direction quadrant
                             // Since we're moving BACKWARDS (S key), we face OPPOSITE of movement direction
@@ -1347,13 +1821,10 @@ object AdvancedPathfinder {
                         }
                     }
                     
-                    // Determine if this is a diagonal bridge (for rotation locking)
-                    val absDiffX = abs(diffX)
-                    val absDiffZ = abs(diffZ)
-                    val isDiagonalBridge = bridgeModeActive && absDiffX > 0.5 && absDiffZ > 0.5
-                    
                     // For diagonal bridges, lock angle immediately without interpolation
                     // For normal movement, use smooth interpolation
+                    var needsLargeTurn = false // Track if large yaw change is needed
+                    
                     if (isDiagonalBridge) {
                         // Instant rotation lock for diagonal bridges
                         player.rotationYaw = targetYaw
@@ -1362,13 +1833,28 @@ object AdvancedPathfinder {
                         val currentYaw = player.rotationYaw
                         var yawDiff = targetYaw - currentYaw
                         
-                        // Normalize to [-180, 180] to take shortest path
-                        while (yawDiff > 180f) yawDiff -= 360f
-                        while (yawDiff < -180f) yawDiff += 360f
+                        // Calculate both rotation directions to reach target
+                        var normalizedDiff = yawDiff
+                        while (normalizedDiff > 180f) normalizedDiff -= 360f
+                        while (normalizedDiff < -180f) normalizedDiff += 360f
+                        
+                        // Consider both left and right rotation paths
+                        val rightTurnDistance = normalizedDiff // Positive = turn right
+                        val leftTurnDistance = if (normalizedDiff > 0) normalizedDiff - 360f else normalizedDiff + 360f // Negative = turn left
+                        
+                        // Choose the shorter path, but consider both options are valid
+                        yawDiff = if (Math.abs(rightTurnDistance) <= Math.abs(leftTurnDistance)) {
+                            rightTurnDistance // Shorter right path
+                        } else {
+                            leftTurnDistance // Shorter left path
+                        }
+                        
+                        // If yaw change is > 90 degrees, pause walking to turn
+                        needsLargeTurn = Math.abs(yawDiff) > 90f
                         
                         // Smooth interpolation: rotate gradually instead of instantly
-                        // Use 50% interpolation for responsive but smooth movement
-                        val smoothingFactor = 0.5f
+                        // Use 25% interpolation for slower, smoother movement
+                        val smoothingFactor = 0.25f
                         val newYaw = currentYaw + (yawDiff * smoothingFactor)
                         
                         // Apply yaw rotation
@@ -1377,9 +1863,11 @@ object AdvancedPathfinder {
                     
                     // Set pitch
                     if (bridgeModeActive) {
-                        // For bridging, just use the base pitch directly
-                        // Crosshair validation is too complex and causes issues
-                        player.rotationPitch = targetPitch
+                        // For bridging, smoothly interpolate pitch for slower camera changes
+                        // Use 20% interpolation for slower, smoother pitch adjustments while bridging
+                        val pitchDiff = targetPitch - player.rotationPitch
+                        val smoothPitchFactor = 0.2f
+                        player.rotationPitch += pitchDiff * smoothPitchFactor
                     }
 
                     // Eagle bridging uses BACKWARDS movement (S key), others use forward (W key)
@@ -1387,11 +1875,6 @@ object AdvancedPathfinder {
                         // TRUE EAGLE BRIDGING: Move backwards while shifting
                         Movement.stopForward()
                         Movement.startBackward()
-                        
-                        // Determine if this is diagonal or straight bridge for speedbridge
-                        val absDiffX = abs(diffX)
-                        val absDiffZ = abs(diffZ)
-                        val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5
                         
                         // Check for block placement by monitoring hotbar block count
                         val currentBlockCount = countBlocksInHotbar()
@@ -1445,17 +1928,26 @@ object AdvancedPathfinder {
                         }
                     } else {
                         // Normal forward movement
-                        Movement.stopBackward()
-                        Movement.startForward()
-                        
-                        // Don't sprint on mandatory nodes (tight elevation areas) or Y-changing nodes
-                        val hasElevationChange = currentNode.actionType == ActionType.JUMP || 
-                                                currentNode.actionType == ActionType.SPRINT ||
-                                                abs(diffY) > 0.5
-                        if (currentNode.isMandatory || hasElevationChange) {
+                        // If large yaw change is needed, pause walking to turn first
+                        if (needsLargeTurn) {
+                            Movement.stopForward()
+                            Movement.stopBackward()
                             Movement.stopSprinting()
+                            Movement.stopLeft()
+                            Movement.stopRight()
                         } else {
-                            Movement.startSprinting()
+                            Movement.stopBackward()
+                            Movement.startForward()
+                            
+                            // Don't sprint on mandatory nodes (tight elevation areas) or Y-changing nodes
+                            val hasElevationChange = currentNode.actionType == ActionType.JUMP || 
+                                                    currentNode.actionType == ActionType.SPRINT ||
+                                                    abs(diffY) > 0.5
+                            if (currentNode.isMandatory || hasElevationChange) {
+                                Movement.stopSprinting()
+                            } else {
+                                Movement.startSprinting()
+                            }
                         }
                     }
 
@@ -1513,11 +2005,6 @@ object AdvancedPathfinder {
                                 // Continue eagle bridging - place blocks
                                 Movement.stopBackward()
                                 Movement.startBackward()
-                                
-                                // Determine if this is a diagonal bridge based on movement direction
-                                val absDiffX = abs(diffX)
-                                val absDiffZ = abs(diffZ)
-                                val isDiagonalBridge = absDiffX > 0.5 && absDiffZ > 0.5 // Both X and Z movement
                                 
                                 // Check for block placement by monitoring hotbar block count
                                 val currentBlockCount = countBlocksInHotbar()
@@ -1586,7 +2073,10 @@ object AdvancedPathfinder {
                             
                             if (isGoingDown) {
                                 // Skip bridge mode; treat as normal walk/fall
-                                if (debugMode) ChatUtils.info("§e[Pathfinder] §7Descending - skipping bridge")
+                                if (debugMode && lastDescentWaypointLogged != currentPathIndex) {
+                                    ChatUtils.info("§e[Pathfinder] §7Descending - skipping bridge")
+                                    lastDescentWaypointLogged = currentPathIndex
+                                }
                             } else if (!bridgeModeActive) {
                                 // Only activate bridge mode on FIRST BRIDGE node of a section
                                 // Check if previous node was NOT a BRIDGE
@@ -1603,13 +2093,19 @@ object AdvancedPathfinder {
                                     }
                                     
                                     // Set proper camera angle for bridging BEFORE starting
-                                    // This ensures the bot is looking at the right angle before placing blocks
+                                    // Use smooth interpolation instead of instant rotation
                                     val bridgeYaw = player.rotationYaw + 180f  // Face backwards for eagle bridge
                                     val bridgePitch = 83f  // Proper angle for bridging downward
                                     
-                                    // Smoothly rotate to bridge angle (no blocking sleep - use timer-based state)
-                                    player.rotationYaw = bridgeYaw
-                                    player.rotationPitch = bridgePitch
+                                    // Smoothly rotate to bridge angle using interpolation
+                                    val yawDiff = bridgeYaw - player.rotationYaw
+                                    var normalizedYawDiff = yawDiff
+                                    while (normalizedYawDiff > 180f) normalizedYawDiff -= 360f
+                                    while (normalizedYawDiff < -180f) normalizedYawDiff += 360f
+                                    
+                                    // Apply smooth interpolation (20% per tick for bridging entry)
+                                    player.rotationYaw += normalizedYawDiff * 0.2f
+                                    player.rotationPitch += (bridgePitch - player.rotationPitch) * 0.2f
                                     // Note: EagleBridge will handle movement only - AdvancedPathfinder controls rotation
                                     
                                     // Activate eagle bridging and STAY IN IT for entire bridge section

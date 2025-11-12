@@ -173,7 +173,7 @@ object EagleBridge {
         val world = BedwarsAFK.mc.theWorld ?: return false
 
         // FIRST: Check block directly below player (must be solid)
-        val playerBelowPos = BlockPos(player.posX, player.posY - 1, player.posZ)
+        val playerBelowPos = BlockPos(Math.floor(player.posX).toInt(), Math.floor(player.posY - 1).toInt(), Math.floor(player.posZ).toInt())
         val playerBelowBlock = world.getBlockState(playerBelowPos).block
         if (playerBelowBlock == Blocks.air) {
             // Player is over void, bridge incomplete
@@ -188,9 +188,9 @@ object EagleBridge {
         
         // Check 2 blocks behind the player to ensure bridge is solid
         for (distance in 1..2) {
-            val checkX = (player.posX + backwardX * distance).toInt()
-            val checkY = (player.posY - 1.0).toInt()  // Check 1 block below player level
-            val checkZ = (player.posZ + backwardZ * distance).toInt()
+            val checkX = Math.floor(player.posX + backwardX * distance).toInt()
+            val checkY = Math.floor(player.posY - 1.0).toInt()  // Check 1 block below player level
+            val checkZ = Math.floor(player.posZ + backwardZ * distance).toInt()
             
             val pos = BlockPos(checkX, checkY, checkZ)
             val block = world.getBlockState(pos).block
@@ -299,9 +299,9 @@ object EagleBridge {
                             val forwardX = -MathHelper.sin(yaw.toFloat())
                             val forwardZ = MathHelper.cos(yaw.toFloat())
                             val placePos = BlockPos(
-                                player.posX.toInt(),
-                                (player.posY - 1.0).toInt(),
-                                player.posZ.toInt()
+                                Math.floor(player.posX).toInt(),
+                                Math.floor(player.posY - 1.0).toInt(),
+                                Math.floor(player.posZ).toInt()
                             )
                             
                             val placed = tryPlaceBlockBehind(player, world, placePos)
@@ -399,9 +399,9 @@ object EagleBridge {
         
         // The block we CLICK ON is one block forward and 1 Y level below (the face we place against)
         val clickOnPos = BlockPos(
-            (player.posX + forwardX).toInt(),
-            (player.posY - 1.0).toInt(), // Same Y level as the block we're placing
-            (player.posZ + forwardZ).toInt()
+            Math.floor(player.posX + forwardX).toInt(),
+            Math.floor(player.posY - 1.0).toInt(), // Same Y level as the block we're placing
+            Math.floor(player.posZ + forwardZ).toInt()
         )
         
         // Check if position already has a block
@@ -432,10 +432,10 @@ object EagleBridge {
         
         // Determine the facing direction (which face of clickOnPos to click on)
         val facing = when {
-            dx < 0 -> EnumFacing.WEST   // PlacePos is east of clickOnPos, so click on west face
-            dx > 0 -> EnumFacing.EAST   // PlacePos is west of clickOnPos, so click on east face
-            dz < 0 -> EnumFacing.NORTH  // PlacePos is south of clickOnPos, so click on north face
-            dz > 0 -> EnumFacing.SOUTH  // PlacePos is north of clickOnPos, so click on south face
+            dx < 0 -> EnumFacing.WEST   // PlacePos is west of clickOnPos, so click on west face
+            dx > 0 -> EnumFacing.EAST   // PlacePos is east of clickOnPos, so click on east face
+            dz < 0 -> EnumFacing.NORTH  // PlacePos is north of clickOnPos, so click on north face
+            dz > 0 -> EnumFacing.SOUTH  // PlacePos is south of clickOnPos, so click on south face
             else -> EnumFacing.UP       // Fallback
         }
         
