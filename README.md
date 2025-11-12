@@ -2,16 +2,19 @@
 
 A Minecraft 1.8.9 Forge mod that recreates the functionality of the original Bedwars AFKv1 macro bot using Duck Dueller's advanced movement and looking framework.
 
-## 🆕 Recent Updates (October 2025)
+## 🆕 Recent Updates (November 2025)
 
-### **Pathfinding Enhancements**
-- ✅ **Fixed diagonal bridging** - 180° angle correction (was going opposite direction)
-- ✅ **Vertical movement** - Added pillaring up (3-10 blocks) and drop down navigation
-- ✅ **Performance boost** - Increased node limit to 20,000 for complex paths
-- ✅ **Cleaner UX** - Removed aggressive logging and join messages
-- ✅ **Simplified bridging** - Instant angle lock, no interpolation delays
+### **Pathfinding & Bridging Improvements**
+- ✅ **Bridge state synchronization** - Fixed desynchronization between AdvancedPathfinder and EagleBridge
+- ✅ **Stuck recovery enhancements** - Three-tier recovery system with successful jump detection
+- ✅ **Camera smoothing** - Multiple interpolation speeds for natural movement (0.1f-0.25f)
+- ✅ **Large turn pause** - Complete movement stop when turning >90°
+- ✅ **Bidirectional rotation** - Intelligently chooses shortest rotation path
+- ✅ **Exit validation separation** - Bridge exit logic separated from platform/safedrop checks
+- ✅ **Documentation consolidation** - Reduced redundant docs, improved organization
 
-See [PATHFINDER_3D_UPGRADE.md](PATHFINDER_3D_UPGRADE.md) for full details.
+See [PATHFINDING_ARCHITECTURE_ANALYSIS.md](PATHFINDING_ARCHITECTURE_ANALYSIS.md) for complete details.
+See [PATHFINDING_GUIDE.md](PATHFINDING_GUIDE.md) for user-facing features.
 
 ---
 
