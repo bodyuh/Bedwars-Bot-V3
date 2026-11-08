@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonArray
+import com.google.gson.JsonPrimitive
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.inventory.GuiChest
 import net.minecraft.client.settings.KeyBinding
@@ -318,7 +319,7 @@ class SkywarsRecorder {
                             // Walkable if 2 air blocks above and solid block below
                             val isWalkable = (b1 == Blocks.air) && (b2 == Blocks.air) && (groundSide != Blocks.air && groundSide.isCollidable)
                             if (isWalkable) {
-                                accessibleSides.add(name)
+                                accessibleSides.add(JsonPrimitive(name))
                             }
                         }
                         cObj.add("accessible_approach_sides", accessibleSides)
