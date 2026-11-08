@@ -140,9 +140,6 @@ class SkywarsBot {
 
         if (!isEnabled) return
 
-        // Auto Armor runs constantly in background
-        AutoArmor.tick()
-
         when (state) {
             BotState.LOBBY -> {
                 // Idle in lobby or waiting
