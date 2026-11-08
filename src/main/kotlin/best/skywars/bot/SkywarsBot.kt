@@ -175,17 +175,31 @@ class SkywarsBot {
                 }
 
                 if (targetChest != null) {
+                    val isStuck = ChestLooter.tickApproach()
+                    if (isStuck) {
+                        logChat("${EnumChatFormatting.YELLOW}Сундук заблокирован, пропускаю...")
+                        return
+                    }
+
                     val dist = player.getDistance(targetChest.x + 0.5, targetChest.y.toDouble(), targetChest.z + 0.5)
                     ChestLooter.lookAtBlock(targetChest)
 
-                    if (dist > 3.0) {
+                    if (dist > 2.8) {
                         // Walk to chest
                         KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.keyCode, true)
                         KeyBinding.setKeyBindState(mc.gameSettings.keyBindSprint.keyCode, true)
+
+                        // Auto-jump over 1-block obstacles/slabs on the island floor
+                        if (player.isCollidedHorizontally && player.onGround) {
+                            KeyBinding.setKeyBindState(mc.gameSettings.keyBindJump.keyCode, true)
+                        } else {
+                            KeyBinding.setKeyBindState(mc.gameSettings.keyBindJump.keyCode, false)
+                        }
                     } else {
                         // In reach: stop and right click to open
                         KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.keyCode, false)
                         KeyBinding.setKeyBindState(mc.gameSettings.keyBindSprint.keyCode, false)
+                        KeyBinding.setKeyBindState(mc.gameSettings.keyBindJump.keyCode, false)
                         KeyBinding.setKeyBindState(mc.gameSettings.keyBindUseItem.keyCode, true)
                         TimeHelper.setTimeout({
                             KeyBinding.setKeyBindState(mc.gameSettings.keyBindUseItem.keyCode, false)

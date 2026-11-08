@@ -5,7 +5,6 @@ import net.minecraft.client.gui.inventory.GuiChest
 import net.minecraft.inventory.ContainerChest
 import net.minecraft.tileentity.TileEntityChest
 import net.minecraft.util.BlockPos
-import net.minecraft.util.Vec3
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.sqrt
@@ -18,14 +17,20 @@ object ChestLooter {
     var targetChestPos: BlockPos? = null
 
     private var openTicks = 0
+    private var approachTicks = 0
     private var lastLootTick = 0L
 
     fun reset() {
         lootedChests.clear()
         targetChestPos = null
         openTicks = 0
+        approachTicks = 0
     }
 
+    /**
+     * Find next chest strictly on the surface platform
+     * IGNORES all chests below the floor level (cave/sub-island chests)!
+     */
     fun findNextChest(spawnPos: BlockPos): BlockPos? {
         val world = mc.theWorld ?: return null
         val player = mc.thePlayer ?: return null
@@ -35,26 +40,31 @@ object ChestLooter {
             if (tile is TileEntityChest) {
                 val pos = tile.pos
                 if (lootedChests.contains(pos)) continue
+
                 val distFromSpawn = spawnPos.distanceSq(pos)
-                if (distFromSpawn <= 18.0 * 18.0) { // On spawn island
-                    islandChests.add(tile)
+                if (distFromSpawn > 18.0 * 18.0) continue // Too far from spawn island
+
+                // CRITICAL FIX: Only consider chests on the current upper/surface platform!
+                // If the chest is lower than spawn floor (dy < -1.0) or lower than player feet (dyPlayer < -1.0)
+                // DO NOT TARGET IT! This prevents the bot from spinning on top of the block above it.
+                val dySpawn = pos.y - spawnPos.y
+                val dyPlayer = pos.y - player.posY
+
+                if (dySpawn < -1.0 || dyPlayer < -1.0 || dySpawn > 3.5) {
+                    continue
                 }
+
+                islandChests.add(tile)
             }
         }
 
         if (islandChests.isEmpty()) return null
 
-        // Sort by minimum |deltaY| first (same platform), then by distance to player
+        // Sort by closest horizontal distance on platform
         islandChests.sortWith(Comparator { c1, c2 ->
-            val dy1 = abs(c1.pos.y - player.posY)
-            val dy2 = abs(c2.pos.y - player.posY)
-            if (abs(dy1 - dy2) > 1.5) {
-                dy1.compareTo(dy2)
-            } else {
-                val d1 = player.getDistanceSq(c1.pos)
-                val d2 = player.getDistanceSq(c2.pos)
-                d1.compareTo(d2)
-            }
+            val d1 = player.getDistanceSq(c1.pos)
+            val d2 = player.getDistanceSq(c2.pos)
+            d1.compareTo(d2)
         })
 
         return islandChests.firstOrNull()?.pos
@@ -66,17 +76,19 @@ object ChestLooter {
 
         if (screen is GuiChest) {
             openTicks++
+            approachTicks = 0 // Reset approach counter once chest is open
             val container = screen.inventorySlots
             if (container is ContainerChest) {
                 val chestInv = container.lowerChestInventory
                 val now = System.currentTimeMillis()
 
-                // Fast shift-click loot delay ~50-80ms like the recorded player
-                if (now - lastLootTick >= 65) {
+                // Fast shift-click loot delay ~65-90ms
+                if (now - lastLootTick >= 70) {
                     var foundValuable = false
                     for (i in 0 until chestInv.sizeInventory) {
                         val stack = chestInv.getStackInSlot(i)
-                        if (stack != null && ItemFilter.isValuable(stack)) {
+                        // Use smart filter that compares against current inventory & sword enchant
+                        if (stack != null && ItemFilter.shouldLoot(stack, player)) {
                             mc.playerController.windowClick(
                                 container.windowId,
                                 i,
@@ -90,8 +102,8 @@ object ChestLooter {
                         }
                     }
 
-                    // If no valuable items remain or timeout exceeded (25 ticks = 1.25s)
-                    if (!foundValuable || openTicks > 25) {
+                    // If no valuable items remain or timeout exceeded (20 ticks = 1.0s)
+                    if (!foundValuable || openTicks > 20) {
                         if (targetChestPos != null) {
                             lootedChests.add(targetChestPos!!)
                             targetChestPos = null
@@ -108,6 +120,24 @@ object ChestLooter {
         return false
     }
 
+    /**
+     * Call every tick while walking towards chest
+     * Returns true if stuck too long (skips chest)
+     */
+    fun tickApproach(): Boolean {
+        approachTicks++
+        if (approachTicks > 70) { // 3.5 seconds stuck without opening
+            val badChest = targetChestPos
+            if (badChest != null) {
+                lootedChests.add(badChest) // Mark as done to avoid retrying
+            }
+            targetChestPos = null
+            approachTicks = 0
+            return true // Stuck, skip it
+        }
+        return false
+    }
+
     fun lookAtBlock(pos: BlockPos) {
         val player = mc.thePlayer ?: return
         val dx = (pos.x + 0.5) - player.posX
@@ -116,11 +146,23 @@ object ChestLooter {
         val dist = sqrt(dx * dx + dz * dz)
 
         val targetYaw = (Math.toDegrees(atan2(dz, dx)) - 90.0).toFloat()
-        val targetPitch = (-Math.toDegrees(atan2(dy, dist))).toFloat()
+        val targetPitch = (-Math.toDegrees(atan2(dy, dist))).toFloat().coerceIn(-65f, 65f)
 
-        // Smooth rotation interpolation
-        player.rotationYaw = interpolateAngle(player.rotationYaw, targetYaw, 0.35f)
-        player.rotationPitch = interpolateAngle(player.rotationPitch, targetPitch, 0.35f)
+        // Smooth rotation interpolation with GCD
+        val smoothYaw = interpolateAngle(player.rotationYaw, targetYaw, 0.40f)
+        val smoothPitch = interpolateAngle(player.rotationPitch, targetPitch, 0.40f)
+
+        player.rotationYaw = applyGCD(smoothYaw, player.rotationYaw)
+        player.rotationPitch = applyGCD(smoothPitch, player.rotationPitch)
+    }
+
+    private fun applyGCD(targetAngle: Float, currentAngle: Float): Float {
+        val sens = mc.gameSettings.mouseSensitivity * 0.6f + 0.2f
+        val gcd = sens * sens * sens * 1.2f
+        if (gcd <= 0f) return targetAngle
+        val delta = targetAngle - currentAngle
+        val fixedDelta = Math.round(delta / gcd) * gcd
+        return currentAngle + fixedDelta
     }
 
     private fun interpolateAngle(from: Float, to: Float, factor: Float): Float {
