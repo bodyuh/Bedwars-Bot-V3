@@ -1,18 +1,16 @@
 [
   {
-    "modid": "keystrokes",
-    "name": "Keystrokes Mod",
-    "description": "Displays keystrokes and CPS on screen",
+    "modid": "skywarsrecorder",
+    "name": "Skywars Telemetry Recorder",
+    "description": "Records full tick-by-tick player telemetry, chests, environment, and inputs for behavior analysis",
     "version": "1.0.0",
     "mcversion": "1.8.9",
     "url": "",
     "updateUrl": "",
-    "authorList": ["KeystrokesDev"],
-    "credits": "Simple keystrokes display mod",
+    "authorList": ["bodyuh"],
+    "credits": "",
     "logoFile": "",
     "screenshots": [],
     "dependencies": []
   }
 ]
-
-
