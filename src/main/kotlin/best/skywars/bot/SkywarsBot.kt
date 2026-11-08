@@ -47,9 +47,10 @@ class SkywarsBot {
         var state = BotState.LOBBY
     }
 
-    private var spawnPos: BlockPos? = null
+    private var landingPos: BlockPos? = null
     private var targetBridgePos: BlockPos? = null
     private var lastStateChange = 0L
+    private var lootWaitTicks = 0
 
     // Regex for kill tracking to detect Hypixel Bulldozer strength
     private val killPattern = Pattern.compile("(.+) (?:was killed by|died to|thrown into the void by|was knocked into the void by|was blasted into the void by) (.+)\\.")
@@ -90,21 +91,17 @@ class SkywarsBot {
         // 1. Detect match start
         if (raw.contains("Cages open in", ignoreCase = true)) {
             state = BotState.IN_CAGE
-            val player = mc.thePlayer
-            if (player != null) {
-                spawnPos = BlockPos(player.posX, player.posY, player.posZ)
-            }
+            landingPos = null
+            lootWaitTicks = 0
             ChestLooter.reset()
             CombatEngine.reset()
         }
 
         if (raw.contains("Cages opened!", ignoreCase = true) || raw.contains("The game has started!", ignoreCase = true)) {
             state = BotState.LOOTING_CHESTS
-            val player = mc.thePlayer
-            if (player != null) {
-                spawnPos = BlockPos(player.posX, player.posY, player.posZ)
-            }
-            logChat("${EnumChatFormatting.AQUA}Клетки открылись! Старт лута сундуков.")
+            landingPos = null
+            lootWaitTicks = 0
+            logChat("${EnumChatFormatting.AQUA}Клетки открылись! Ожидаю приземления на остров...")
         }
 
         // 2. Track Kills for Strength (Bulldozer) perk detection
@@ -151,7 +148,19 @@ class SkywarsBot {
             }
 
             BotState.LOOTING_CHESTS -> {
-                val origin = spawnPos ?: BlockPos(player.posX, player.posY, player.posZ)
+                // Wait until player lands on solid ground after dropping from cage
+                if (landingPos == null) {
+                    if (player.onGround) {
+                        landingPos = BlockPos(player.posX, player.posY, player.posZ)
+                        logChat("${EnumChatFormatting.GREEN}Приземлился на остров (Y=${landingPos!!.y}). Ищу сундуки...")
+                    } else {
+                        // Still in air, do not walk or look around
+                        stopAllMovement()
+                        return
+                    }
+                }
+
+                val origin = landingPos ?: BlockPos(player.posX, player.posY, player.posZ)
 
                 // Currently in a chest GUI
                 if (mc.currentScreen != null) {
@@ -159,9 +168,9 @@ class SkywarsBot {
                     if (finished) {
                         // Check if we need more chests
                         val nextChest = ChestLooter.findNextChest(origin)
-                        if (nextChest == null || ChestLooter.lootedChests.size >= 3) {
+                        if (nextChest == null || ChestLooter.lootedChests.size >= 2) {
                             state = BotState.COMBAT
-                            logChat("${EnumChatFormatting.GREEN}Лут завершен. Переход к поиску врагов!")
+                            logChat("${EnumChatFormatting.GREEN}Лут острова завершен (${ChestLooter.lootedChests.size} сунд.). Переход к поиску врагов!")
                         }
                     }
                     return
@@ -175,6 +184,7 @@ class SkywarsBot {
                 }
 
                 if (targetChest != null) {
+                    lootWaitTicks = 0
                     val isStuck = ChestLooter.tickApproach()
                     if (isStuck) {
                         logChat("${EnumChatFormatting.YELLOW}Сундук заблокирован, пропускаю...")
@@ -206,7 +216,11 @@ class SkywarsBot {
                         }, 50)
                     }
                 } else {
-                    // No more chests found
+                    // If we haven't found chests yet, wait up to 40 ticks for world to load before giving up
+                    lootWaitTicks++
+                    if (lootWaitTicks < 40 && ChestLooter.lootedChests.isEmpty()) {
+                        return
+                    }
                     state = BotState.COMBAT
                     logChat("${EnumChatFormatting.GREEN}Сундуки острова залутаны. Ищу соперников!")
                 }
@@ -232,16 +246,20 @@ class SkywarsBot {
                 val nearestEnemy = CombatEngine.findNearestEnemy()
                 if (nearestEnemy != null) {
                     val dist = player.getDistanceToEntity(nearestEnemy)
+                    val hasBlocks = SkyBridge.findHotbarBlocks() != -1
 
-                    // Check if enemy is across a void gap (> 12 blocks) and we need to bridge
-                    val feetPos = BlockPos(player.posX, player.posY - 1, player.posZ)
-                    val groundAhead = world.getBlockState(feetPos).block
-
-                    if (dist > 14.0f && SkyBridge.findHotbarBlocks() != -1) {
-                        // Need bridge to reach them
-                        targetBridgePos = BlockPos(nearestEnemy.posX, nearestEnemy.posY, nearestEnemy.posZ)
-                        state = BotState.BRIDGING
-                        return
+                    // If enemy is far across a gap (> 11m)
+                    if (dist > 11.0f) {
+                        if (hasBlocks) {
+                            targetBridgePos = BlockPos(nearestEnemy.posX, nearestEnemy.posY, nearestEnemy.posZ)
+                            state = BotState.BRIDGING
+                            return
+                        } else {
+                            // NO BLOCKS: Do NOT walk forward into the void! Hold position on island
+                            stopAllMovement()
+                            CombatEngine.lookAtEntity(nearestEnemy)
+                            return
+                        }
                     }
 
                     // Direct engagement via CombatEngine

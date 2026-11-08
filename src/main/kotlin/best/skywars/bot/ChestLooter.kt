@@ -2,6 +2,7 @@ package best.skywars.bot
 
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.inventory.GuiChest
+import net.minecraft.init.Blocks
 import net.minecraft.inventory.ContainerChest
 import net.minecraft.tileentity.TileEntityChest
 import net.minecraft.util.BlockPos
@@ -31,7 +32,7 @@ object ChestLooter {
      * Find next chest strictly on the surface platform
      * IGNORES all chests below the floor level (cave/sub-island chests)!
      */
-    fun findNextChest(spawnPos: BlockPos): BlockPos? {
+    fun findNextChest(landingPos: BlockPos): BlockPos? {
         val world = mc.theWorld ?: return null
         val player = mc.thePlayer ?: return null
 
@@ -41,18 +42,20 @@ object ChestLooter {
                 val pos = tile.pos
                 if (lootedChests.contains(pos)) continue
 
-                val distFromSpawn = spawnPos.distanceSq(pos)
-                if (distFromSpawn > 18.0 * 18.0) continue // Too far from spawn island
+                // Check horizontal distance from island landing point
+                val dx = (pos.x - landingPos.x).toDouble()
+                val dz = (pos.z - landingPos.z).toDouble()
+                val horizontalDistSq = dx * dx + dz * dz
+                if (horizontalDistSq > 18.0 * 18.0) continue // Too far from spawn island
 
-                // CRITICAL FIX: Only consider chests on the current upper/surface platform!
-                // If the chest is lower than spawn floor (dy < -1.0) or lower than player feet (dyPlayer < -1.0)
-                // DO NOT TARGET IT! This prevents the bot from spinning on top of the block above it.
-                val dySpawn = pos.y - spawnPos.y
-                val dyPlayer = pos.y - player.posY
+                // Height check relative to where the player landed on the island:
+                // Only chests on the surface platform (landing.y - 1 to landing.y + 4)
+                val dy = pos.y - landingPos.y
+                if (dy < -1 || dy > 4) continue
 
-                if (dySpawn < -1.0 || dyPlayer < -1.0 || dySpawn > 3.5) {
-                    continue
-                }
+                // Ensure the chest is NOT buried underground (block directly above chest MUST be AIR)
+                val blockAbove = world.getBlockState(pos.up()).block
+                if (blockAbove != Blocks.air) continue
 
                 islandChests.add(tile)
             }
@@ -82,7 +85,7 @@ object ChestLooter {
                 val chestInv = container.lowerChestInventory
                 val now = System.currentTimeMillis()
 
-                // Fast shift-click loot delay ~65-90ms
+                // Fast shift-click loot delay ~70ms
                 if (now - lastLootTick >= 70) {
                     var foundValuable = false
                     for (i in 0 until chestInv.sizeInventory) {

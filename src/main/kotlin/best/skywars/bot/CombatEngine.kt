@@ -229,7 +229,7 @@ object CombatEngine {
         return bestSlot
     }
 
-    private fun lookAtEntity(target: Entity) {
+    fun lookAtEntity(target: Entity) {
         val player = mc.thePlayer ?: return
         val dx = target.posX - player.posX
         // Aim at torso/head (height * 0.75)
