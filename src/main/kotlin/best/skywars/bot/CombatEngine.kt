@@ -6,9 +6,6 @@ import net.minecraft.entity.Entity
 import net.minecraft.entity.player.EntityPlayer
 import net.minecraft.item.ItemFishingRod
 import net.minecraft.item.ItemSword
-import net.minecraft.util.AxisAlignedBB
-import net.minecraft.util.MovingObjectPosition
-import net.minecraft.util.Vec3
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.atan2
 import kotlin.math.sqrt
@@ -122,7 +119,7 @@ object CombatEngine {
 
         // 2. Normal Combat: Enemy has NO Strength
 
-        // Look smoothly at target hitbox
+        // Look smoothly at target hitbox using GCD-aligned angles
         lookAtEntity(target)
 
         // Fishing Rod knockback trick at 4.5m - 8.0m distance
@@ -146,7 +143,7 @@ object CombatEngine {
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindBack.keyCode, false)
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindSprint.keyCode, true)
         } else if (dist < 1.7f) {
-            // Keep the user's sweet spot distance ~1.9m - 2.1m
+            // Keep sweet spot combo distance ~1.9m - 2.1m
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.keyCode, false)
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindBack.keyCode, true)
         } else {
@@ -155,20 +152,29 @@ object CombatEngine {
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.keyCode, true)
         }
 
-        // Critical hit timing: jump when approaching inside 3.2m
-        if (dist <= 3.2f && player.onGround && Math.random() < 0.25) {
+        // Critical hit timing: jump when approaching inside 3.0m
+        if (dist <= 3.0f && player.onGround && Math.random() < 0.25) {
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindJump.keyCode, true)
         } else {
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindJump.keyCode, false)
         }
 
-        // Attack trigger (Reach up to 3.5m like the user)
-        if (dist <= 3.5f && (now - lastAttackTime >= 100)) { // 10 CPS click rhythm
-            player.swingItem()
-            mc.playerController.attackEntity(player, target)
+        // 3. Attack trigger: NO custom reach packets!
+        // We simulate native LMB clicks with human-like jittered delay (95-135ms ~ 8-11 CPS).
+        // Vape v4 hooks getMouseOver / raytrace and handles the 3.15-3.2 Reach completely legitimately.
+        val isAimedAtTarget = mc.objectMouseOver?.entityHit == target
+        val jitteredDelay = (95 + Math.random() * 40).toLong()
+
+        if ((isAimedAtTarget || dist <= 3.2f) && (now - lastAttackTime >= jitteredDelay)) {
+            // Press native attack key so Minecraft/Vape processes raycast and reach
+            KeyBinding.setKeyBindState(mc.gameSettings.keyBindAttack.keyCode, true)
             lastAttackTime = now
 
-            // W-Tap: reset sprint on hit for maximum knockback
+            TimeHelper.setTimeout({
+                KeyBinding.setKeyBindState(mc.gameSettings.keyBindAttack.keyCode, false)
+            }, (30 + Math.random() * 20).toLong())
+
+            // W-Tap: momentary sprint reset on hit for knockback combo
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.keyCode, false)
             KeyBinding.setKeyBindState(mc.gameSettings.keyBindForward.keyCode, true)
         }
@@ -234,9 +240,21 @@ object CombatEngine {
         val targetYaw = (Math.toDegrees(atan2(dz, dx)) - 90.0).toFloat()
         val targetPitch = (-Math.toDegrees(atan2(dy, dist))).toFloat()
 
-        // Human-like smooth rotation
-        player.rotationYaw = interpolateAngle(player.rotationYaw, targetYaw, 0.40f)
-        player.rotationPitch = interpolateAngle(player.rotationPitch, targetPitch, 0.40f)
+        // Interpolate angle with GCD parity for mouse sensitivity
+        val smoothYaw = interpolateAngle(player.rotationYaw, targetYaw, 0.40f)
+        val smoothPitch = interpolateAngle(player.rotationPitch, targetPitch, 0.40f)
+
+        player.rotationYaw = applyGCD(smoothYaw, player.rotationYaw)
+        player.rotationPitch = applyGCD(smoothPitch, player.rotationPitch)
+    }
+
+    private fun applyGCD(targetAngle: Float, currentAngle: Float): Float {
+        val sens = mc.gameSettings.mouseSensitivity * 0.6f + 0.2f
+        val gcd = sens * sens * sens * 1.2f
+        if (gcd <= 0f) return targetAngle
+        val delta = targetAngle - currentAngle
+        val fixedDelta = Math.round(delta / gcd) * gcd
+        return currentAngle + fixedDelta
     }
 
     private fun interpolateAngle(from: Float, to: Float, factor: Float): Float {
