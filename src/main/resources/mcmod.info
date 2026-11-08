@@ -1,8 +1,8 @@
 [
   {
-    "modid": "skywarsrecorder",
-    "name": "Skywars Telemetry Recorder",
-    "description": "Records full tick-by-tick player telemetry, chests, environment, and inputs for behavior analysis",
+    "modid": "skywarsbot",
+    "name": "Skywars Autoplay Bot",
+    "description": "Full autonomous Skywars Bot with smart looting, rod combos, anti-strength avoidance, and auto-requeue",
     "version": "1.0.0",
     "mcversion": "1.8.9",
     "url": "",
